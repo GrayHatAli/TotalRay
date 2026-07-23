@@ -1,0 +1,86 @@
+# ══════════════════════════════════════════════════════════════
+#  pi-vpn-gateway - Raspberry Pi VPN client manager settings
+# ══════════════════════════════════════════════════════════════
+
+# Subscription links - any number of them (plain string or name+url)
+subscriptions: []
+  # - "https://example.com/sub/abcdef"
+  # - name: "second sub"
+  #   url: "https://example.com/sub2"
+  # - name: "picky panel (needs an exact client fingerprint)"
+  #   url: "https://example.com/sub3"
+  #   headers:                       # replaces the default User-Agent rotation entirely
+  #     User-Agent: "Happ/5.1.0/macos catalyst/2607150020650"
+  #     X-Device-OS: "macOS"
+  #     X-HWID: "hipkmy78ncca7l8i"
+  #     X-Device-Locale: "en"
+  #     X-Ver-OS: "26.5.1"
+  #     X-App-Version: "5.1.0"
+  #     X-Device-model: "MacBook"
+  #     Accept: "*/*"
+  #     Accept-Encoding: "gzip, deflate, br"
+  #     Accept-Language: "en-US,en;q=0.9"
+  #     Connection: "keep-alive"
+
+schedule:
+  sub_update_minutes: 360     # automatic subscription refresh
+  pool_a_test_minutes: 15     # test round for the candidate pool (all fetched configs)
+  pool_b_test_minutes: 3      # test round for the verified pool (the one actually used)
+  rules_update_hours: 24      # Iran rule-set refresh
+
+test:
+  url: "https://www.gstatic.com/generate_204"  # real-connectivity test target (not ping)
+  timeout_seconds: 10
+  concurrency: 16             # simultaneous tests
+  retries: 1                  # retry attempts for failures within the same round
+  fail_threshold: -5          # auto-removal threshold (each failure = -1 score)
+  ping_threshold_ms: 3000     # latency above this counts as a failure
+  max_in_group: 50            # max configs inside the urltest group (0 = all)
+  base_port: 24000            # base port for temporary 127.0.0.1 test listeners
+  chunk_size: 96              # inbounds per temporary test sing-box instance
+                               # (lower this on low-RAM boards, e.g. Pi 2/3/Zero)
+
+proxy_group:
+  urltest_interval: "3m"      # sing-box's own internal live re-test interval
+  urltest_tolerance: 50       # minimum edge (ms) needed to switch to a better server
+  idle_timeout: "30m"
+
+routing:
+  iran_direct: true           # Iranian domains/IPs -> direct connection
+  block_ads: false            # block ads/malware (security rule-set)
+  block_quic: false           # reject UDP/443 (more stable on some networks)
+  custom_rules: []
+    # example - each rule combines matchers:
+    # - match:
+    #     domain_regex: ["(^|\\.)mycdn\\.com$"]
+    #   action: route          # route | reject
+    #   outbound: direct       # direct | select (only for action=route)
+    # - match:
+    #     ip_cidr: ["1.2.3.4/32"]
+    #   action: route
+    #   outbound: select
+
+dns:
+  remote_server: "1.1.1.1"    # DoH for non-Iranian domains (via the proxy) - must be an IP
+  local_server: "192.168.1.1" # router DNS for Iranian domains (filled in automatically at install)
+  prefer_ipv4: true
+
+tun:
+  interface: "singtun0"
+  stack: "mixed"              # system | gvisor | mixed - "mixed" is recommended for a gateway
+  mtu: 1500
+
+clash_api:
+  listen: "127.0.0.1:9090"
+  secret: ""                  # required if you set listen to 0.0.0.0
+
+local_proxy:
+  port: 2080                  # explicit SOCKS/HTTP proxy, used as vpnman's own
+                               # fallback path when a direct subscription fetch fails
+
+paths:
+  data_dir: "/var/lib/vpnman"
+  rules_dir: "/etc/sing-box/rules"
+  sing_box_config: "/etc/sing-box/config.json"
+  sing_box_bin: "/usr/bin/sing-box"
+  sing_box_data_dir: "/var/lib/sing-box"   # sing-box's own state dir (cache-file lives here)

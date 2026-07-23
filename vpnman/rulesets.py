@@ -1,0 +1,78 @@
+"""Download and update the Iran rule-sets (sing-box binary .srs format).
+
+Source: Chocolate4U/Iran-sing-box-rules - includes:
+  geosite-ir : Iranian domains (covers all .ir plus Iranian .com/.net domains)
+  geoip-ir   : Iranian IP ranges + local CDNs
+  geosite-category-ads-all : ads/trackers (optional, for block_ads)
+Each file has multiple mirrors defined so jsDelivr can answer if GitHub
+has an outage.
+"""
+from __future__ import annotations
+
+import logging
+import os
+
+import requests
+
+log = logging.getLogger(__name__)
+
+_RULESET_MIRRORS = {
+    "geosite-ir": [
+        "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geosite-ir.srs",
+        "https://cdn.jsdelivr.net/gh/chocolate4u/Iran-sing-box-rules@rule-set/geosite-ir.srs",
+    ],
+    "geoip-ir": [
+        "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geoip-ir.srs",
+        "https://cdn.jsdelivr.net/gh/chocolate4u/Iran-sing-box-rules@rule-set/geoip-ir.srs",
+    ],
+    "geosite-category-ads-all": [
+        "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geosite-category-ads-all.srs",
+        "https://cdn.jsdelivr.net/gh/chocolate4u/Iran-sing-box-rules@rule-set/geosite-category-ads-all.srs",
+    ],
+}
+
+MIN_VALID_SIZE = 1024  # bytes - don't install a corrupt file / error page
+
+
+def needed_rulesets(settings) -> list:
+    names = ["geosite-ir", "geoip-ir"]
+    if settings["routing"].get("block_ads"):
+        names.append("geosite-category-ads-all")
+    return names
+
+
+def update_rulesets(settings) -> dict:
+    os.makedirs(settings.rules_dir, exist_ok=True)
+    report = {}
+    for name in needed_rulesets(settings):
+        dest = os.path.join(settings.rules_dir, f"{name}.srs")
+        ok = False
+        for url in _RULESET_MIRRORS[name]:
+            try:
+                resp = requests.get(url, timeout=60,
+                                    headers={"User-Agent": "curl/8.5.0"})
+                if resp.status_code == 200 and len(resp.content) > MIN_VALID_SIZE:
+                    tmp = dest + ".tmp"
+                    with open(tmp, "wb") as fh:
+                        fh.write(resp.content)
+                    os.replace(tmp, dest)
+                    log.info("rule-set %s updated (%d bytes) <- %s",
+                             name, len(resp.content), url)
+                    ok = True
+                    break
+            except requests.RequestException as exc:
+                log.debug("mirror %s for %s failed: %s", url, name, exc)
+        report[name] = ok
+        if not ok and not os.path.exists(dest):
+            log.error("failed to download rule-set %s!", name)
+    return report
+
+
+def existing_rulesets(settings) -> list:
+    """Names of rule-sets whose file exists on disk and looks valid."""
+    out = []
+    for name in _RULESET_MIRRORS:
+        path = os.path.join(settings.rules_dir, f"{name}.srs")
+        if os.path.isfile(path) and os.path.getsize(path) > MIN_VALID_SIZE:
+            out.append(name)
+    return out

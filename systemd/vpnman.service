@@ -1,0 +1,16 @@
+[Unit]
+Description=pi-vpn-gateway manager (sing-box controller)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/vpnman
+ExecStart=/opt/vpnman/venv/bin/python -m vpnman --config /etc/vpnman/config.yaml run
+Restart=on-failure
+RestartSec=10
+# Must stay root: restarts sing-box and reads/writes under /etc.
+User=root
+
+[Install]
+WantedBy=multi-user.target
