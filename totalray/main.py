@@ -1,4 +1,4 @@
-"""CLI manager - run:  vpnman <command>  (or python -m vpnman)"""
+"""CLI manager - run:  totalray <command>  (or python -m totalray)"""
 from __future__ import annotations
 
 import argparse
@@ -20,7 +20,7 @@ def _setup_logging(settings) -> None:
     root.addHandler(console)
     try:
         fileh = logging.handlers.RotatingFileHandler(
-            os.path.join(settings.data_dir, "vpnman.log"),
+            os.path.join(settings.data_dir, "totalray.log"),
             maxBytes=2_000_000, backupCount=3, encoding="utf-8")
         fileh.setFormatter(fmt)
         root.addHandler(fileh)
@@ -154,6 +154,35 @@ def cmd_status(args):
         print("\n-- close to removal --")
         for row in worst:
             print(f"  score {row['score']:>3}  [pool {row['pool']}]  {row['name']}")
+
+    # per-device section: prefer persisted totals from the DB, fallback to live sampler
+    try:
+        devs = db.get_device_totals()
+        if not devs:
+            from .traffic import get_device_stats
+            devs = get_device_stats(settings)
+        if devs:
+            print("\n-- connected devices (syncbox) --")
+            for d in devs:
+                ip = d.get('ip') or d.get('ip')
+                last_seen = d.get('last_seen', '-')
+                rx = d.get('last_rx', d.get('download', 0))
+                tx = d.get('last_tx', d.get('upload', 0))
+                # try to show last-sample delta if available
+                try:
+                    rows = db.get_recent_device_log(ip, limit=1)
+                    if rows:
+                        r = rows[0]
+                        rxd = r.get('rx_delta', 0)
+                        txd = r.get('tx_delta', 0)
+                    else:
+                        rxd = txd = 0
+                except Exception:
+                    rxd = txd = 0
+                print(f"  {ip}: last_seen={last_seen} | down={rx} bytes (+{rxd}) | up={tx} bytes (+{txd})")
+    except Exception:
+        pass
+
     db.close()
 
 
@@ -161,12 +190,12 @@ def cmd_status(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        prog="vpnman",
+        prog="totalray",
         description="sing-box client manager for a Raspberry Pi transparent gateway")
-    parser.add_argument("--config", default="/etc/vpnman/config.yaml",
+    parser.add_argument("--config", default="/etc/totalray/config.yaml",
                         help="path to config.yaml")
     parser.add_argument("--version", action="version",
-                        version=f"vpnman {__version__}")
+                        version=f"totalray {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init", help="create the database and directories").set_defaults(fn=cmd_init)

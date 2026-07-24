@@ -1,4 +1,4 @@
-"""Daemon scheduler: subscription updates, dual-pool test rounds, rule-set updates."""
+"""Daemon scheduler: subscription updates, dual-pool test rounds, rule-set updates for TotalRay."""
 from __future__ import annotations
 
 import logging
@@ -8,6 +8,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import builder, rulesets, subfetch
 from .tester import GroupTester
+from . import traffic
 
 log = logging.getLogger(__name__)
 
@@ -69,9 +70,23 @@ class Manager:
         finally:
             self._job_lock.release()
 
+    def job_sample_traffic(self):
+        if not self._job_lock.acquire(blocking=False):
+            log.debug("another job is already running; skipping traffic sample")
+            return
+        try:
+            try:
+                devs = traffic.get_device_stats(self.settings)
+                if devs:
+                    self.db.record_device_stats(devs)
+                    log.debug("sampled %d devices", len(devs))
+            except Exception:  # noqa: BLE001
+                log.exception("error sampling device traffic")
+        finally:
+            self._job_lock.release()
+
     # ---------------------------------------------------- core logic
     def run_pool_a_round(self) -> dict:
-        """Test the candidate pool. Passing configs graduate to pool B."""
         candidates = self.db.get_pool_candidates("a")
         if not candidates:
             log.warning("no configs in pool A to test")
@@ -91,7 +106,6 @@ class Manager:
         return stats
 
     def run_pool_b_round(self) -> dict:
-        """Retest the verified pool. Failing configs fall back to pool A."""
         candidates = self.db.get_pool_candidates("b")
         if not candidates:
             log.warning("no configs in pool B to test yet"
@@ -112,7 +126,6 @@ class Manager:
         return stats
 
     def bootstrap(self):
-        """Initial startup: rule-sets -> subscriptions -> pool-A test -> build."""
         log.info("bootstrap: downloading rule-sets...")
         rulesets.update_rulesets(self.settings)
         self.job_update_subs()
@@ -137,6 +150,10 @@ def run_daemon(settings, db):
     scheduler.add_job(manager.job_update_rules, "interval",
                       hours=int(sch["rules_update_hours"]),
                       id="rules", max_instances=1, coalesce=True)
+    # traffic sampler (best-effort): sample every N seconds (default 60)
+    scheduler.add_job(manager.job_sample_traffic, "interval",
+                      seconds=int(sch.get("traffic_sample_seconds", 60)),
+                      id="traffic", max_instances=1, coalesce=True)
     scheduler.start()
     log.info("scheduler active: subs every %d min | pool-A test every %d min |"
              " pool-B test every %d min | rule-sets every %d h",

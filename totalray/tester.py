@@ -1,14 +1,4 @@
-"""Group latency testing for configs.
-
-Instead of ping, a real HTTPS request is made "through the tunnel" for
-each config, measuring the full response time (handshake + round-trip) -
-exactly what the user experiences in practice.
-
-Implementation: a temporary sing-box instance with N mixed inbounds on
-localhost (one port per config) and a static inbound->outbound route,
-then curl requests fired concurrently against each port.
-Output: {config_id: delay_ms | -1}
-"""
+"""Group latency testing for TotalRay (copied from vpnman.tester)."""
 from __future__ import annotations
 
 import json
@@ -22,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 log = logging.getLogger(__name__)
 
-DEFAULT_CHUNK_SIZE = 96      # max inbounds per temporary sing-box instance
+DEFAULT_CHUNK_SIZE = 96
 PORT_WAIT_SECONDS = 8.0
 
 
@@ -53,11 +43,6 @@ def build_test_config(items: list, base_port: int, dns_server: str) -> dict:
     outbounds.append({"type": "direct", "tag": "direct"})
     return {
         "log": {"level": "error"},
-        # NOTE: no "detour" on this DNS server. sing-box >= 1.12 rejects a
-        # DNS server that detours to a bare/empty "direct" outbound with
-        # "detour to an empty direct outbound makes no sense". Omitting
-        # detour is equivalent here anyway, since direct routing is the
-        # only outbound available in this throwaway test config.
         "dns": {"servers": [{"type": "udp", "tag": "local",
                              "server": dns_server}],
                 "final": "local"},
@@ -70,7 +55,6 @@ def build_test_config(items: list, base_port: int, dns_server: str) -> dict:
 
 
 def _measure_once(port: int, url: str, timeout: int) -> int:
-    """Total time for one real request through the port (ms), or -1."""
     started = time.monotonic()
     try:
         proc = subprocess.run(
@@ -113,7 +97,7 @@ class GroupTester:
     def _run_chunk(self, items: list) -> dict:
         cfg = build_test_config(items, self.base_port, self.dns_server)
         results = {item["id"]: -1 for item in items}
-        fd, path = tempfile.mkstemp(prefix="vpnman-test-", suffix=".json")
+        fd, path = tempfile.mkstemp(prefix="totalray-test-", suffix=".json")
         try:
             with os.fdopen(fd, "w") as fh:
                 json.dump(cfg, fh)
@@ -153,7 +137,6 @@ class GroupTester:
         return results
 
     def test_all(self, items: list) -> dict:
-        """items: [{'id':..., 'outbound':{...}}] -> {id: delay_ms | -1}"""
         results = {}
         total = len(items)
         for offset in range(0, total, self.chunk_size):

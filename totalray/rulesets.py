@@ -1,18 +1,10 @@
-"""Download and update the Iran rule-sets (sing-box binary .srs format).
-
-Source: Chocolate4U/Iran-sing-box-rules - includes:
-  geosite-ir : Iranian domains (covers all .ir plus Iranian .com/.net domains)
-  geoip-ir   : Iranian IP ranges + local CDNs
-  geosite-category-ads-all : ads/trackers (optional, for block_ads)
-Each file has multiple mirrors defined so jsDelivr can answer if GitHub
-has an outage.
-"""
+"""Download and update the Iran rule-sets (sing-box binary .srs format) for TotalRay."""
 from __future__ import annotations
 
 import logging
 import os
 
-import requests
+from .http_client import client_for
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +23,7 @@ _RULESET_MIRRORS = {
     ],
 }
 
-MIN_VALID_SIZE = 1024  # bytes - don't install a corrupt file / error page
+MIN_VALID_SIZE = 1024
 
 
 def needed_rulesets(settings) -> list:
@@ -44,13 +36,13 @@ def needed_rulesets(settings) -> list:
 def update_rulesets(settings) -> dict:
     os.makedirs(settings.rules_dir, exist_ok=True)
     report = {}
+    client = client_for(settings)
     for name in needed_rulesets(settings):
         dest = os.path.join(settings.rules_dir, f"{name}.srs")
         ok = False
         for url in _RULESET_MIRRORS[name]:
             try:
-                resp = requests.get(url, timeout=60,
-                                    headers={"User-Agent": "curl/8.5.0"})
+                resp = client.get(url, timeout=60, headers={"User-Agent": "curl/8.5.0"})
                 if resp.status_code == 200 and len(resp.content) > MIN_VALID_SIZE:
                     tmp = dest + ".tmp"
                     with open(tmp, "wb") as fh:
@@ -60,7 +52,7 @@ def update_rulesets(settings) -> dict:
                              name, len(resp.content), url)
                     ok = True
                     break
-            except requests.RequestException as exc:
+            except Exception as exc:
                 log.debug("mirror %s for %s failed: %s", url, name, exc)
         report[name] = ok
         if not ok and not os.path.exists(dest):
@@ -69,7 +61,6 @@ def update_rulesets(settings) -> dict:
 
 
 def existing_rulesets(settings) -> list:
-    """Names of rule-sets whose file exists on disk and looks valid."""
     out = []
     for name in _RULESET_MIRRORS:
         path = os.path.join(settings.rules_dir, f"{name}.srs")

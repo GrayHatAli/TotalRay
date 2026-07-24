@@ -36,32 +36,32 @@ command -v sing-box >/dev/null 2>&1 || { echo "sing-box install failed; install 
 sing-box version
 
 echo "== [3/7] Copying files and building the Python environment..."
-install -d /opt/vpnman /etc/vpnman /var/lib/vpnman /etc/sing-box/rules
-rm -rf /opt/vpnman/vpnman
-cp -r "$SRC_DIR/vpnman" /opt/vpnman/vpnman
-cp "$SRC_DIR/requirements.txt" /opt/vpnman/requirements.txt
-python3 -m venv /opt/vpnman/venv
-/opt/vpnman/venv/bin/pip install -q --upgrade pip
-/opt/vpnman/venv/bin/pip install -q -r /opt/vpnman/requirements.txt
+install -d /opt/totalray /etc/totalray /var/lib/totalray /etc/sing-box/rules
+rm -rf /opt/totalray/totalray
+cp -r "$SRC_DIR/totalray" /opt/totalray/totalray
+cp "$SRC_DIR/requirements.txt" /opt/totalray/requirements.txt
+python3 -m venv /opt/totalray/venv
+/opt/totalray/venv/bin/pip install -q --upgrade pip
+/opt/totalray/venv/bin/pip install -q -r /opt/totalray/requirements.txt
 
-cat > /usr/local/bin/vpnman <<'WRAPEOF'
+cat > /usr/local/bin/totalray <<'WRAPEOF'
 #!/usr/bin/env bash
-# cd into /opt/vpnman first: `python -m vpnman` resolves the package
+# cd into /opt/totalray first: `python -m totalray` resolves the package
 # relative to the current working directory, not to this script's path.
-# Without this, the command fails with "No module named vpnman" whenever
+# Without this, the command fails with "No module named totalray" whenever
 # it's invoked from any other directory.
-cd /opt/vpnman && exec /opt/vpnman/venv/bin/python -m vpnman --config /etc/vpnman/config.yaml "$@"
+cd /opt/totalray && exec /opt/totalray/venv/bin/python -m totalray --config /etc/totalray/config.yaml "$@"
 WRAPEOF
-chmod +x /usr/local/bin/vpnman
+chmod +x /usr/local/bin/totalray
 
-[ -f /etc/vpnman/config.yaml ] || cp "$SRC_DIR/config.yaml" /etc/vpnman/config.yaml
+[ -f /etc/totalray/config.yaml ] || cp "$SRC_DIR/config.yaml" /etc/totalray/config.yaml
 
 echo "== [4/7] Detecting the network and setting the local DNS..."
 DEF_IFACE="$(ip route show default | awk '/default/{print $5; exit}')"
 GW="$(ip route show default | awk '/default/{print $3; exit}')"
 PI_IP="$(ip -4 addr show dev "$DEF_IFACE" | awk '/inet /{print $2; exit}' | cut -d/ -f1)"
 echo "   interface: $DEF_IFACE | Pi IP: $PI_IP | router: $GW"
-[ -n "$GW" ] && sed -i "s|^  local_server:.*|  local_server: \"$GW\"|" /etc/vpnman/config.yaml
+[ -n "$GW" ] && sed -i "s|^  local_server:.*|  local_server: \"$GW\"|" /etc/totalray/config.yaml
 
 echo "== [5/7] Enabling IP forwarding and dnsmasq..."
 cat > /etc/sysctl.d/99-pivpn.conf <<'EOF2'
@@ -83,12 +83,12 @@ systemctl enable --now dnsmasq >/dev/null 2>&1 || true
 systemctl restart dnsmasq
 
 echo "== [6/7] Installing services..."
-cp "$SRC_DIR/systemd/vpnman.service" /etc/systemd/system/vpnman.service
+cp "$SRC_DIR/systemd/totalray.service" /etc/systemd/system/totalray.service
 systemctl daemon-reload
-systemctl enable sing-box vpnman >/dev/null 2>&1 || true
+systemctl enable sing-box totalray >/dev/null 2>&1 || true
 
 echo "== [7/7] Downloading the Iran rule-sets..."
-vpnman update-rules || true
+totalray update-rules || true
 
 cat <<DONE
 
@@ -97,12 +97,12 @@ cat <<DONE
 ╚══════════════════════════════════════════════════════════════╝
 
 Next steps:
-  1) Add your subscriptions to the end of /etc/vpnman/config.yaml:
+  1) Add your subscriptions to the end of /etc/totalray/config.yaml:
        subscriptions:
          - "https://..."
-  2) Or with:   sudo vpnman add-sub "https://..."
-  3) Start the service:   sudo systemctl start vpnman
-  4) Check status:        sudo vpnman status
+  2) Or with:   sudo totalray add-sub "https://..."
+  3) Start the service:   sudo systemctl start totalray
+  4) Check status:        sudo totalray status
 
 Network (important - pick one):
   a) Turn off the router's DHCP so dnsmasq on the Pi ($PI_IP)
@@ -111,5 +111,5 @@ Network (important - pick one):
   b) Keep the router's DHCP, but manually set each device's
      gateway/DNS to $PI_IP.
 
-Logs:  journalctl -u vpnman -f   |   journalctl -u sing-box -f
+Logs:  journalctl -u totalray -f   |   journalctl -u sing-box -f
 DONE

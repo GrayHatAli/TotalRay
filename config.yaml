@@ -27,6 +27,7 @@ schedule:
   pool_a_test_minutes: 15     # test round for the candidate pool (all fetched configs)
   pool_b_test_minutes: 3      # test round for the verified pool (the one actually used)
   rules_update_hours: 24      # Iran rule-set refresh
+  traffic_sample_seconds: 60  # how often to sample per-device counters (seconds)
 
 test:
   url: "https://www.gstatic.com/generate_204"  # real-connectivity test target (not ping)
@@ -79,7 +80,7 @@ local_proxy:
                                # fallback path when a direct subscription fetch fails
 
 paths:
-  data_dir: "/var/lib/vpnman"
+  data_dir: "/var/lib/totalray"
   rules_dir: "/etc/sing-box/rules"
   sing_box_config: "/etc/sing-box/config.json"
   sing_box_bin: "/usr/bin/sing-box"

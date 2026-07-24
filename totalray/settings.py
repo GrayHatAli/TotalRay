@@ -1,4 +1,4 @@
-"""Load and merge config.yaml with the built-in defaults."""
+"""Load and merge config.yaml with the built-in defaults for TotalRay."""
 from __future__ import annotations
 
 import copy
@@ -10,8 +10,8 @@ DEFAULTS: dict = {
     "subscriptions": [],
     "schedule": {
         "sub_update_minutes": 360,
-        "pool_a_test_minutes": 15,   # candidate pool retest interval
-        "pool_b_test_minutes": 3,    # verified/active pool retest interval
+        "pool_a_test_minutes": 15,
+        "pool_b_test_minutes": 3,
         "rules_update_hours": 24,
     },
     "test": {
@@ -20,10 +20,10 @@ DEFAULTS: dict = {
         "concurrency": 16,
         "retries": 1,
         "fail_threshold": -5,
-        "ping_threshold_ms": 3000,   # max latency to count as "healthy"
+        "ping_threshold_ms": 3000,
         "max_in_group": 50,
         "base_port": 24000,
-        "chunk_size": 96,           # inbounds per temporary test instance
+        "chunk_size": 96,
     },
     "proxy_group": {
         "urltest_interval": "3m",
@@ -51,23 +51,13 @@ DEFAULTS: dict = {
         "secret": "",
     },
     "local_proxy": {
-        # Explicit SOCKS/HTTP proxy on the box itself, bound to the same
-        # "select" group as the transparent TUN. Lets vpnman's own
-        # processes (subscription fetching) deliberately opt into the
-        # tunnel as a fallback, instead of relying on the all-or-nothing
-        # transparent capture.
         "port": 2080,
     },
     "paths": {
-        "data_dir": "/var/lib/vpnman",
+        "data_dir": "/var/lib/totalray",
         "rules_dir": "/etc/sing-box/rules",
         "sing_box_config": "/etc/sing-box/config.json",
         "sing_box_bin": "/usr/bin/sing-box",
-        # Own state directory of the sing-box service (matches its -D
-        # flag / package default). The cache-file MUST live here rather
-        # than under vpnman's data_dir: the official sing-box systemd
-        # unit is sandboxed and only has write access to its own state
-        # directory, not to /var/lib/vpnman.
         "sing_box_data_dir": "/var/lib/sing-box",
     },
 }
@@ -93,23 +83,8 @@ class Settings:
     def __getitem__(self, section: str) -> dict:
         return self.data[section]
 
-    # --- convenience accessors ---
     @property
     def subscriptions(self) -> list:
-        """Normalize to a list of {name, url, headers} dicts.
-
-        `headers` lets a specific subscription override the User-Agent /
-        add extra headers it requires - some panels (e.g. custom
-        subscription.php scripts bound to a specific app's fingerprint)
-        reject anything that doesn't look exactly like their own app,
-        regardless of IP or TLS. Example in config.yaml:
-
-            subscriptions:
-              - url: "https://example.com/sub"
-                headers:
-                  User-Agent: "Happ/5.1.0/macos catalyst/2607150020650"
-                  X-HWID: "..."
-        """
         out = []
         for item in self.data.get("subscriptions") or []:
             if isinstance(item, str):
@@ -126,7 +101,7 @@ class Settings:
 
     @property
     def db_path(self) -> str:
-        return os.path.join(self.data_dir, "vpnman.db")
+        return os.path.join(self.data_dir, "totalray.db")
 
     @property
     def rules_dir(self) -> str:

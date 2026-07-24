@@ -1,0 +1,31 @@
+[Unit]
+Description=TotalRay gateway manager (sing-box controller)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/totalray
+ExecStart=/opt/totalray/venv/bin/python -m totalray --config /etc/totalray/config.yaml run
+Restart=on-failure
+RestartSec=10
+User=root
+
+[Install]
+WantedBy=multi-user.target
+[Unit]
+Description=TotalRay manager (sing-box controller)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/totalray
+ExecStart=/opt/totalray/venv/bin/python -m totalray --config /etc/totalray/config.yaml run
+Restart=on-failure
+RestartSec=10
+# Must stay root: restarts sing-box and reads/writes under /etc.
+User=root
+
+[Install]
+WantedBy=multi-user.target
