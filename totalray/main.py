@@ -6,6 +6,7 @@ import logging
 import logging.handlers
 import os
 import sys
+import json
 
 from . import __version__
 
@@ -186,6 +187,45 @@ def cmd_status(args):
     db.close()
 
 
+def cmd_failed_requests(args):
+    settings, db = _load(args)
+    log_path = os.path.join(settings.data_dir, "totalray_failed_requests.log")
+    if not os.path.exists(log_path):
+        print("no failed-requests log found at", log_path)
+        db.close()
+        return
+    try:
+        with open(log_path, "r", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except Exception as exc:
+        print("error reading log:", exc)
+        db.close()
+        return
+    n = int(getattr(args, 'lines', 20) or 20)
+    tail = lines[-n:] if n > 0 else lines
+    if getattr(args, 'json', False):
+        for l in tail:
+            print(l)
+        db.close()
+        return
+    for l in tail:
+        try:
+            obj = json.loads(l)
+        except Exception:
+            print(l)
+            continue
+        ts = obj.get("ts", "-")
+        method = obj.get("method", "-")
+        url = obj.get("url", "-")
+        status = obj.get("status_code") if "status_code" in obj else obj.get("error", "-")
+        snippet = obj.get("response_snippet", "") or obj.get("kwargs", {}).get("data", "")
+        snippet = (snippet.replace("\n", " ")[:200]) if isinstance(snippet, str) else ""
+        print(f"{ts} {method} {status} {url}")
+        if snippet:
+            print(f"  {snippet}")
+    db.close()
+
+
 # --------------------------------------------------------------- argparse
 
 def main(argv=None):
@@ -218,6 +258,10 @@ def main(argv=None):
     sub.add_parser("build", help="build and apply the sing-box config").set_defaults(fn=cmd_build)
     sub.add_parser("run", help="run the scheduler daemon (service)").set_defaults(fn=cmd_run)
     sub.add_parser("status", help="status and ranking of configs").set_defaults(fn=cmd_status)
+    p = sub.add_parser("failed-requests", help="show recent failed HTTP requests")
+    p.add_argument("-n", "--lines", type=int, default=20, help="number of recent entries to show")
+    p.add_argument("--json", action="store_true", help="print raw JSON lines")
+    p.set_defaults(fn=cmd_failed_requests)
 
     args = parser.parse_args(argv)
     settings, _ = _load_minimal(args)

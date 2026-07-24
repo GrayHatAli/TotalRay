@@ -23,3 +23,33 @@ sudo bash scripts/install.sh
 Config: `/etc/totalray/config.yaml`
 Data & logs: `/var/lib/totalray/` (rotating `totalray.log`) 
 
+Packaging / CI
+
+- Installer: `scripts/install.sh` installs files under `/opt/totalray`, creates a venv, and installs Python dependencies from `requirements.txt`. It also installs a systemd unit at `/etc/systemd/system/totalray.service` and a CLI wrapper at `/usr/local/bin/totalray`.
+- Uninstall: `scripts/uninstall.sh` removes installed files; use `--purge` to remove data.
+- CI: there is no CI config in this repository; if you add GitHub Actions or other CI, point build/test steps to run `python -m py_compile totalray/*.py` and `pip install -r requirements.txt` inside the created environment.
+
+Service & logs
+
+- Start the service: `sudo systemctl start totalray`
+- Enable at boot: `sudo systemctl enable totalray`
+- View logs: `journalctl -u totalray -f` and `journalctl -u sing-box -f`.
+- Failed HTTP requests and non-2xx responses are recorded in JSON-lines format at:
+	`/var/lib/totalray/totalray_failed_requests.log` (rotate/inspect as needed).
+
+Developer / testing
+
+- Quick syntax check:
+
+```bash
+python3 -m py_compile totalray/*.py
+```
+
+- To run the CLI from the repository without installing, use:
+
+```bash
+cd /path/to/TotalRay && python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+python -m totalray --config config.yaml status
+```
+
