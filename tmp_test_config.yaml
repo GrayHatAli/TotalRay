@@ -1,0 +1,4 @@
+paths:
+  data_dir: ./tmp_test_data
+schedule:
+  traffic_sample_seconds: 60
