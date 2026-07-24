@@ -157,6 +157,17 @@ def cmd_status(args):
             print(f"  score {row['score']:>3}  [pool {row['pool']}]  {row['name']}")
 
     # per-device section: prefer persisted totals from the DB, fallback to live sampler
+    def _human(n: int) -> str:
+        try:
+            n = int(n or 0)
+        except Exception:
+            return str(n)
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if n < 1024:
+                return f"{n}{unit}"
+            n = n // 1024
+        return f"{n}PB"
+
     try:
         devs = db.get_device_totals()
         if not devs:
@@ -169,18 +180,21 @@ def cmd_status(args):
                 last_seen = d.get('last_seen', '-')
                 rx = d.get('last_rx', d.get('download', 0))
                 tx = d.get('last_tx', d.get('upload', 0))
-                # try to show last-sample delta if available
+                # try to show last-sample delta and timestamp if available
                 try:
                     rows = db.get_recent_device_log(ip, limit=1)
                     if rows:
                         r = rows[0]
-                        rxd = r.get('rx_delta', 0)
-                        txd = r.get('tx_delta', 0)
+                        rxd = int(r.get('rx_delta', 0) or 0)
+                        txd = int(r.get('tx_delta', 0) or 0)
+                        sample_ts = r.get('ts', '-')
                     else:
                         rxd = txd = 0
+                        sample_ts = '-'
                 except Exception:
                     rxd = txd = 0
-                print(f"  {ip}: last_seen={last_seen} | down={rx} bytes (+{rxd}) | up={tx} bytes (+{txd})")
+                    sample_ts = '-'
+                print(f"  {ip}  last_seen={last_seen}  down={_human(rx)} (+{_human(rxd)})  up={_human(tx)} (+{_human(txd)})  last_sample={sample_ts}")
     except Exception:
         pass
 
@@ -224,6 +238,38 @@ def cmd_failed_requests(args):
         if snippet:
             print(f"  {snippet}")
     db.close()
+    # follow mode: stream appended lines
+    if getattr(args, 'follow', False):
+        try:
+            with open(log_path, "r", encoding="utf-8") as fh:
+                # move to end
+                fh.seek(0, os.SEEK_END)
+                import time as _time
+                while True:
+                    line = fh.readline()
+                    if not line:
+                        _time.sleep(0.5)
+                        continue
+                    line = line.rstrip("\n")
+                    if getattr(args, 'json', False):
+                        print(line)
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        print(line)
+                        continue
+                    ts = obj.get("ts", "-")
+                    method = obj.get("method", "-")
+                    url = obj.get("url", "-")
+                    status = obj.get("status_code") if "status_code" in obj else obj.get("error", "-")
+                    snippet = obj.get("response_snippet", "") or obj.get("kwargs", {}).get("data", "")
+                    snippet = (snippet.replace("\n", " ")[:200]) if isinstance(snippet, str) else ""
+                    print(f"{ts} {method} {status} {url}")
+                    if snippet:
+                        print(f"  {snippet}")
+        except KeyboardInterrupt:
+            return
 
 
 # --------------------------------------------------------------- argparse
@@ -261,6 +307,7 @@ def main(argv=None):
     p = sub.add_parser("failed-requests", help="show recent failed HTTP requests")
     p.add_argument("-n", "--lines", type=int, default=20, help="number of recent entries to show")
     p.add_argument("--json", action="store_true", help="print raw JSON lines")
+    p.add_argument("-f", "--follow", action="store_true", help="follow the log (like tail -f)")
     p.set_defaults(fn=cmd_failed_requests)
 
     args = parser.parse_args(argv)
