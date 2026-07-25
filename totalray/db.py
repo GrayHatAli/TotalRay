@@ -130,6 +130,26 @@ class Database:
                  "outbound": json.loads(r["outbound"]),
                  "delay": r["last_delay"]} for r in rows]
 
+    def get_pool_candidates(self, pool: str, max_n: int = 0) -> list:
+        """Backwards-compatible alias for older scheduler code."""
+        return self.get_pool_configs(pool, max_n)
+
+    def top_configs(self, limit: int = 10) -> list:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT name, last_delay FROM configs"
+                " WHERE removed=0 AND pool='b' AND last_delay>0"
+                " ORDER BY last_delay ASC LIMIT ?", (limit,)).fetchall()
+        return [{"name": r["name"], "last_delay": r["last_delay"]} for r in rows]
+
+    def worst_configs(self, limit: int = 5) -> list:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT name, pool, score FROM configs"
+                " WHERE removed=0"
+                " ORDER BY score ASC LIMIT ?", (limit,)).fetchall()
+        return [{"name": r["name"], "pool": r["pool"], "score": r["score"]} for r in rows]
+
     # ---------------- device traffic persistence
     def record_device_stats(self, devices: list) -> None:
         """Persist per-device cumulative counters and insert per-sample deltas.
@@ -188,10 +208,19 @@ class Database:
         with self._lock:
             def one(q, *p):
                 return self._conn.execute(q, p).fetchone()[0]
+            # last test rounds (if any)
+            def last_round(pool: str):
+                row = self._conn.execute(
+                    "SELECT ts, total, ok, failed, removed FROM test_log WHERE pool=? ORDER BY ts DESC LIMIT 1",
+                    (pool,)).fetchone()
+                return dict(row) if row else None
+
             return {
                 "total": one("SELECT COUNT(*) FROM configs"),
                 "pool_a": one("SELECT COUNT(*) FROM configs WHERE removed=0 AND pool='a'"),
                 "pool_b": one("SELECT COUNT(*) FROM configs WHERE removed=0 AND pool='b'"),
                 "removed": one("SELECT COUNT(*) FROM configs WHERE removed=1"),
                 "subs": one("SELECT COUNT(*) FROM subscriptions"),
+                "last_test_a": last_round('a'),
+                "last_test_b": last_round('b'),
             }

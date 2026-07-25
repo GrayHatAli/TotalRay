@@ -87,7 +87,7 @@ class Manager:
 
     # ---------------------------------------------------- core logic
     def run_pool_a_round(self) -> dict:
-        candidates = self.db.get_pool_candidates("a")
+        candidates = self.db.get_pool_configs("a")
         if not candidates:
             log.warning("no configs in pool A to test")
             return {"total": 0}
@@ -106,7 +106,7 @@ class Manager:
         return stats
 
     def run_pool_b_round(self) -> dict:
-        candidates = self.db.get_pool_candidates("b")
+        candidates = self.db.get_pool_configs("b")
         if not candidates:
             log.warning("no configs in pool B to test yet"
                         " (nothing has been promoted from pool A)")
