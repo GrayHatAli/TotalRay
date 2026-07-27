@@ -41,7 +41,7 @@ def get_device_stats(settings) -> list:
         # List all counters; the admin can set up nft counters tagged for
         # TotalRay to collect per-IP bytes which this parser will pick up.
         out = subprocess.check_output(
-            ["nft", "list", "counter"], text=True,
+            ["nft", "list", "counters"], text=True,
             stderr=subprocess.DEVNULL)
         parsed = _parse_nft_output(out)
         # The parser returns generic 'bytes' counts; we present them as both

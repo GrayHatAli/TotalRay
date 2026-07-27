@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+tmp_test_data/
+tmp_test_config.yaml
+venv/

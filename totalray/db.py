@@ -100,6 +100,10 @@ class Database:
             return [dict(r) for r in self._conn.execute(
                 "SELECT * FROM subscriptions ORDER BY id")]
 
+    def enabled_subscriptions(self) -> list:
+        """Backwards-compatible alias for older subfetch.py code."""
+        return self.list_subscriptions()
+
     def sync_configs(self, sub_id: int, items: list) -> int:
         added = 0
         with self._lock, self._conn:
