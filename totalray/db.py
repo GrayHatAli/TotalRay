@@ -104,6 +104,20 @@ class Database:
         """Backwards-compatible alias for older subfetch.py code."""
         return self.list_subscriptions()
 
+    def set_sub_status(self, sub_id: int, status: str, count: int = None) -> None:
+        """Record the outcome of the last fetch attempt for a subscription."""
+        with self._lock, self._conn:
+            if count is not None:
+                self._conn.execute(
+                    "UPDATE subscriptions SET last_status=?, last_count=?,"
+                    " last_update=datetime('now') WHERE id=?",
+                    (status, count, sub_id))
+            else:
+                self._conn.execute(
+                    "UPDATE subscriptions SET last_status=?,"
+                    " last_update=datetime('now') WHERE id=?",
+                    (status, sub_id))
+
     def sync_configs(self, sub_id: int, items: list) -> int:
         added = 0
         with self._lock, self._conn:
@@ -116,6 +130,101 @@ class Database:
                      json.dumps(item["outbound"], ensure_ascii=False), sub_id))
                 added += cur.rowcount
         return added
+
+    def _apply_score(self, cid: int, delay, ping_threshold: int,
+                      fail_threshold: int, promote_to: str, demote_to: str,
+                      demote_threshold: int = 0) -> str:
+        """Update score/pool/last_delay for one config based on a test result.
+
+        `demote_threshold` lets a caller require more than one consecutive
+        failure before the config's *pool* actually changes (score still
+        decrements every time either way). This matters specifically for
+        pool-B: every pool membership change makes rebuild_and_apply()
+        restart sing-box, and sing-box has a known bug where frequent
+        restarts leave stale kernel routes and start crash-looping
+        (https://github.com/SagerNet/sing-box/issues/3572). A single
+        marginal ping crossing the threshold and bouncing back next round
+        used to demote-then-immediately-repromote the same config twice
+        in a row, causing two restarts for nothing; requiring e.g. 2
+        consecutive failures absorbs that without meaningfully delaying
+        the removal of a genuinely dead config.
+
+        Returns one of: 'ok' (passed, now/still in promote_to pool),
+        'grace' (failed, but under demote_threshold - score docked, pool
+        unchanged), 'failed' (failed past demote_threshold, moved to
+        demote_to pool), 'removed' (score hit fail_threshold, soft-deleted).
+        Caller must hold the connection/lock already.
+        """
+        row = self._conn.execute(
+            "SELECT score FROM configs WHERE id=?", (cid,)).fetchone()
+        if row is None:
+            return "skip"
+        passed = delay is not None and delay > 0 and delay <= ping_threshold
+        if passed:
+            self._conn.execute(
+                "UPDATE configs SET score=0, last_delay=?, pool=?,"
+                " last_ok_at=datetime('now'), last_test_at=datetime('now')"
+                " WHERE id=?",
+                (int(delay), promote_to, cid))
+            return "ok"
+        score = row["score"] - 1
+        stored_delay = int(delay) if (delay is not None and delay > 0) else -1
+        if score <= fail_threshold:
+            self._conn.execute(
+                "UPDATE configs SET score=?, last_delay=?, removed=1,"
+                " last_test_at=datetime('now') WHERE id=?",
+                (score, stored_delay, cid))
+            return "removed"
+        if score <= demote_threshold:
+            self._conn.execute(
+                "UPDATE configs SET score=?, last_delay=?, pool=?,"
+                " last_test_at=datetime('now') WHERE id=?",
+                (score, stored_delay, demote_to, cid))
+            return "failed"
+        self._conn.execute(
+            "UPDATE configs SET score=?, last_delay=?,"
+            " last_test_at=datetime('now') WHERE id=?",
+            (score, stored_delay, cid))
+        return "grace"
+
+    def record_pool_a_results(self, results: dict, ping_threshold: int,
+                               fail_threshold: int = -5) -> dict:
+        """results: {config_id: delay_ms or -1}. Passing configs -> pool b."""
+        return self._record_round("a", results, ping_threshold, fail_threshold,
+                                   promote_to="b", demote_to="a")
+
+    def record_pool_b_results(self, results: dict, ping_threshold: int,
+                               fail_threshold: int = -5,
+                               demote_grace: int = 2) -> dict:
+        """results: {config_id: delay_ms or -1}. Failing configs -> pool a,
+        but only after `demote_grace` consecutive failures."""
+        return self._record_round("b", results, ping_threshold, fail_threshold,
+                                   promote_to="b", demote_to="a",
+                                   demote_threshold=-demote_grace)
+
+    def _record_round(self, pool: str, results: dict, ping_threshold: int,
+                       fail_threshold: int, promote_to: str, demote_to: str,
+                       demote_threshold: int = 0) -> dict:
+        ok = failed = 0
+        removed_ids = []
+        with self._lock, self._conn:
+            for cid, delay in results.items():
+                outcome = self._apply_score(cid, delay, ping_threshold,
+                                            fail_threshold, promote_to, demote_to,
+                                            demote_threshold)
+                if outcome == "ok":
+                    ok += 1
+                elif outcome in ("failed", "grace"):
+                    failed += 1
+                elif outcome == "removed":
+                    failed += 1
+                    removed_ids.append(cid)
+            self._conn.execute(
+                "INSERT INTO test_log(pool, total, ok, failed, removed)"
+                " VALUES (?,?,?,?,?)",
+                (pool, len(results), ok, failed, len(removed_ids)))
+        return {"total": len(results), "ok": ok,
+                "failed": failed, "removed": removed_ids}
 
     def get_pool_configs(self, pool: str, max_n: int = 0) -> list:
         with self._lock:
@@ -135,8 +244,30 @@ class Database:
                  "delay": r["last_delay"]} for r in rows]
 
     def get_pool_candidates(self, pool: str, max_n: int = 0) -> list:
-        """Backwards-compatible alias for older scheduler code."""
-        return self.get_pool_configs(pool, max_n)
+        """All non-removed configs in this pool, for the purpose of
+        picking who gets (re)tested this round.
+
+        This is deliberately NOT the same query as get_pool_configs():
+        that one only returns entries with a valid positive last_delay
+        (right for building the live sing-box group from known-good pool
+        B members), which silently excludes anything whose last test was
+        a hard failure (last_delay == -1, not NULL and not > 0). Reusing
+        it here meant a config that ever timed out fell into a gap it
+        could never leave - never retested, never promoted, never scored
+        down to removal. Candidate selection must include every
+        non-removed row in the pool, full stop.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, name, outbound, last_delay FROM configs"
+                " WHERE removed=0 AND pool=?"
+                " ORDER BY last_test_at IS NOT NULL, last_test_at",
+                (pool,)).fetchall()
+        if max_n and max_n > 0:
+            rows = rows[:max_n]
+        return [{"id": r["id"], "name": r["name"],
+                 "outbound": json.loads(r["outbound"]),
+                 "delay": r["last_delay"]} for r in rows]
 
     def top_configs(self, limit: int = 10) -> list:
         with self._lock:
