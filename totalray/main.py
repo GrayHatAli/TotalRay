@@ -128,12 +128,80 @@ def cmd_run(args):
     db.close()
 
 
+def _live_connection_status(settings, db) -> str:
+    """Ask sing-box's Clash API which server the 'auto' group actually has
+    selected right now, then independently check the apparent public exit
+    IP (ipify) and see if it matches that server. This is a real
+    connectivity check, not just "is the service running": a config can be
+    selected in sing-box's routing table while itself being dead, and
+    ipify alone can't tell you *which* server you're behind.
+    """
+    import socket
+    import requests
+
+    clash = settings["clash_api"]
+    host, _, port = clash["listen"].partition(":")
+    host = host or "127.0.0.1"
+    headers = {}
+    if clash.get("secret"):
+        headers["Authorization"] = f"Bearer {clash['secret']}"
+
+    try:
+        resp = requests.get(f"http://{host}:{port}/proxies/auto",
+                            headers=headers, timeout=5)
+        resp.raise_for_status()
+        now = resp.json().get("now", "")
+    except Exception as exc:  # noqa: BLE001
+        return f"status        : disconnected (sing-box / clash API unreachable: {exc})"
+
+    if now == "direct" or not now:
+        return "status        : disconnected (no verified server selected - pool B is empty)"
+
+    row = None
+    if now.startswith("cfg-"):
+        with db._lock:  # noqa: SLF001 - read-only single-row lookup
+            r = db._conn.execute(
+                "SELECT * FROM configs WHERE id=?", (now[4:],)).fetchone()
+            row = dict(r) if r else None
+
+    server = None
+    name = now
+    if row:
+        name = row.get("name") or now
+        try:
+            server = json.loads(row["outbound"]).get("server")
+        except Exception:  # noqa: BLE001
+            server = None
+
+    try:
+        exit_ip = requests.get("https://api.ipify.org", timeout=8).text.strip()
+    except Exception as exc:  # noqa: BLE001
+        return (f"status        : disconnected (selected {name}, but no exit IP"
+                f" response: {exc})")
+
+    server_ip = server
+    if server and not server.replace(".", "").isdigit():
+        try:
+            server_ip = socket.gethostbyname(server)
+        except OSError:
+            server_ip = None
+
+    if server_ip and exit_ip == server_ip:
+        return f"status        : connected (via {name}, exit IP {exit_ip} matches)"
+    if server_ip:
+        return (f"status        : degraded (selected {name}, but exit IP {exit_ip}"
+                f" != server IP {server_ip} - traffic may be routing elsewhere)")
+    return (f"status        : connected? (selected {name}, exit IP {exit_ip},"
+            f" could not resolve server address to confirm)")
+
+
 def cmd_status(args):
     settings, db = _load(args)
     stats = db.stats()
     last_a = stats["last_test_a"]
     last_b = stats["last_test_b"]
     print("-- overview --------------------------")
+    print(f"  {_live_connection_status(settings, db)}")
     print(f"  subscriptions : {stats['subs']}")
     print(f"  configs       : {stats['total']} total |"
           f" pool A (candidates): {stats['pool_a']} |"
