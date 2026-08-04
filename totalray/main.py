@@ -137,8 +137,9 @@ def _live_connection_status(settings, db) -> str:
     ipify alone can't tell you *which* server you're behind.
     """
     import socket
-    import requests
+    from .http_client import client_for
 
+    client = client_for(settings)
     clash = settings["clash_api"]
     host, _, port = clash["listen"].partition(":")
     host = host or "127.0.0.1"
@@ -147,8 +148,8 @@ def _live_connection_status(settings, db) -> str:
         headers["Authorization"] = f"Bearer {clash['secret']}"
 
     try:
-        resp = requests.get(f"http://{host}:{port}/proxies/auto",
-                            headers=headers, timeout=5)
+        resp = client.get(f"http://{host}:{port}/proxies/auto",
+                          headers=headers, timeout=5)
         resp.raise_for_status()
         now = resp.json().get("now", "")
     except Exception as exc:  # noqa: BLE001
@@ -174,7 +175,7 @@ def _live_connection_status(settings, db) -> str:
             server = None
 
     try:
-        exit_ip = requests.get("https://api.ipify.org", timeout=8).text.strip()
+        exit_ip = client.get("https://api.ipify.org", timeout=8).text.strip()
     except Exception as exc:  # noqa: BLE001
         return (f"status        : disconnected (selected {name}, but no exit IP"
                 f" response: {exc})")

@@ -43,7 +43,7 @@ test:
 
 proxy_group:
   urltest_interval: "3m"      # sing-box's own internal live re-test interval
-  urltest_tolerance: 50       # minimum edge (ms) needed to switch to a better server
+  urltest_tolerance: 150       # minimum edge (ms) needed to switch to a better server
   idle_timeout: "30m"
 
 routing:
