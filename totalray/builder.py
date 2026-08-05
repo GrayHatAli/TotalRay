@@ -9,6 +9,9 @@ import json
 import logging
 import os
 import subprocess
+import time
+
+import requests
 
 from .rulesets import existing_rulesets
 from . import net
@@ -64,18 +67,27 @@ def build_config(settings, group: list) -> dict:
         log.warning("verified pool (b) is empty; everything routes direct for now")
         cfg_tags = ["direct"]
 
+    # NOTE: "auto" used to be a sing-box `urltest` group, which let sing-box
+    # itself run periodic latency probes and silently switch outbounds on its
+    # own -- fighting with TotalRay's own pool-B scoring/hysteresis logic and
+    # forcing a full config rebuild + sing-box restart (dropping every active
+    # connection) whenever TotalRay wanted to react to a score change.
+    # "auto" is now a plain `selector`: TotalRay is the only thing that ever
+    # changes which member is active, via the Clash API (see
+    # set_active_config()), without touching TUN/routing or restarting
+    # sing-box. interrupt_exist_connections is False on both groups so that
+    # switching the active member does not kill in-flight connections
+    # (video calls, downloads, etc.) -- only new connections take the new
+    # route.
     group_outbounds = [
         {"type": "selector", "tag": "select",
          "outbounds": ["auto", "direct"] + cfg_tags,
          "default": "auto",
-         "interrupt_exist_connections": True},
-        {"type": "urltest", "tag": "auto",
+         "interrupt_exist_connections": False},
+        {"type": "selector", "tag": "auto",
          "outbounds": cfg_tags,
-         "url": settings["test"]["url"],
-         "interval": pg["urltest_interval"],
-         "tolerance": int(pg["urltest_tolerance"]),
-         "idle_timeout": pg["idle_timeout"],
-         "interrupt_exist_connections": True},
+         "default": cfg_tags[0],
+         "interrupt_exist_connections": False},
     ]
     outbounds = group_outbounds + outbounds + [
         {"type": "direct", "tag": "direct"},
@@ -202,6 +214,57 @@ def write_and_check(settings, config: dict) -> tuple[bool, str]:
     return True, target
 
 
+def _group_state_path(settings) -> str:
+    return os.path.join(settings["paths"]["data_dir"], "last_group_tags.json")
+
+
+def _load_last_tags(settings) -> set[str] | None:
+    """Tag set that was active in sing-box as of the last full rebuild.
+    None means unknown (e.g. first run) -- caller should treat that as
+    "changed" and do a full rebuild to be safe."""
+    path = _group_state_path(settings)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return set(json.load(fh))
+    except (OSError, ValueError):
+        return None
+
+
+def _save_last_tags(settings, tags: set[str]) -> None:
+    path = _group_state_path(settings)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(sorted(tags), fh)
+    except OSError:
+        log.warning("failed to persist group state to %s", path)
+
+
+def set_active_config(settings, tag: str, retries: int = 5, delay: float = 1.0) -> tuple[bool, str]:
+    """Point the "auto" selector at `tag` via the Clash API, live -- no
+    config rebuild, no sing-box restart, no TUN/route churn, and (since
+    interrupt_exist_connections is False on this group) no impact on
+    connections that are already in flight."""
+    clash = settings["clash_api"]
+    host = clash["listen"]
+    secret = clash.get("secret") or ""
+    headers = {"Authorization": f"Bearer {secret}"} if secret else {}
+    url = f"http://{host}/proxies/auto"
+    last_err = ""
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.put(url, json={"name": tag}, headers=headers, timeout=5)
+        except (requests.RequestException, OSError) as exc:
+            last_err = str(exc)
+        else:
+            if resp.status_code in (200, 204):
+                return True, "switched"
+            last_err = f"clash api returned {resp.status_code}: {resp.text[:200]}"
+        if attempt < retries:
+            time.sleep(delay)
+    return False, last_err
+
+
 def restart_singbox() -> tuple[bool, str]:
     try:
         proc = subprocess.run(["systemctl", "restart", "sing-box"],
@@ -213,9 +276,34 @@ def restart_singbox() -> tuple[bool, str]:
     return False, (proc.stderr or proc.stdout or "systemctl failed")[-300:]
 
 
-def rebuild_and_apply(settings, db) -> tuple[bool, str]:
+def rebuild_and_apply(settings, db, force: bool = False) -> tuple[bool, str]:
+    """Apply the current pool-B state to sing-box.
+
+    Most rounds, the *set* of verified servers hasn't actually changed --
+    only their relative ranking has. In that (common) case we skip the
+    rebuild/restart entirely and just repoint the "auto" selector at the
+    new best pick over the Clash API, which is instant and does not touch
+    TUN, routing, or any in-flight connection.
+
+    A full rebuild + sing-box restart only happens when the outbound tag
+    set genuinely changed (a server was promoted/demoted/removed), or when
+    `force=True` is passed (e.g. after a rule-set update, where the route
+    section itself changed and a restart is unavoidable).
+    """
     max_n = int(settings["test"]["max_in_group"])
     group = db.get_pool_configs("b", max_n)
+    new_tags = {f"cfg-{item['id']}" for item in group}
+    best_tag = f"cfg-{group[0]['id']}" if group else "direct"
+
+    last_tags = _load_last_tags(settings)
+    if not force and last_tags is not None and last_tags == new_tags:
+        ok, msg = set_active_config(settings, best_tag)
+        if ok:
+            log.info("active config switched to %s via Clash API (no restart)", best_tag)
+            return True, f"switched to {best_tag} (no restart)"
+        log.warning("clash api switch failed (%s); falling back to full rebuild", msg)
+        # fall through to the full rebuild below as a safety net
+
     config = build_config(settings, group)
     ok, msg = write_and_check(settings, config)
     if not ok:
@@ -223,5 +311,9 @@ def rebuild_and_apply(settings, db) -> tuple[bool, str]:
     ok, msg = restart_singbox()
     if not ok:
         return False, f"config written but restart failed: {msg}"
+    _save_last_tags(settings, new_tags)
+    ok2, msg2 = set_active_config(settings, best_tag)
+    if not ok2:
+        log.warning("post-restart clash api selection failed: %s (selector default will be used instead)", msg2)
     log.info("new config applied (%d configs in group)", len(group))
     return True, f"{len(group)} configs in group"

@@ -63,7 +63,7 @@ class Manager:
         try:
             log.info("updating rule-sets...")
             rulesets.update_rulesets(self.settings)
-            ok, msg = builder.rebuild_and_apply(self.settings, self.db)
+            ok, msg = builder.rebuild_and_apply(self.settings, self.db, force=True)
             log.info("config applied after rule-set update: %s %s", ok, msg)
         except Exception:  # noqa: BLE001
             log.exception("error updating rule-sets")
