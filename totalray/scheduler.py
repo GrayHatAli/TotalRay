@@ -6,7 +6,7 @@ import threading
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import builder, rulesets, subfetch
+from . import builder, net, rulesets, subfetch
 from .tester import GroupTester
 from . import traffic
 
@@ -18,6 +18,26 @@ class Manager:
         self.settings = settings
         self.db = db
         self._job_lock = threading.Lock()
+        self._internet_was_down = False
+
+    def _internet_ok(self) -> bool:
+        """Guard for pool-A/pool-B test rounds: if the ISP link itself is
+        down (as opposed to individual configs being blocked/dead), every
+        config in a round would fail its test for reasons that have
+        nothing to do with the config -- and without this check, a real
+        outage looks identical to "every server is bad" and mass-demotes
+        or removes the entire pool. Only logs on state transitions so a
+        prolonged outage does not spam the log every couple of minutes.
+        """
+        up = net.internet_up()
+        if not up and not self._internet_was_down:
+            log.warning("no internet connectivity detected (all well-known"
+                       " probe IPs unreachable) -- pausing pool test rounds"
+                       " until connectivity returns")
+        elif up and self._internet_was_down:
+            log.info("internet connectivity restored; resuming pool test rounds")
+        self._internet_was_down = not up
+        return up
 
     # ---------------------------------------------------- jobs
     def job_update_subs(self):
@@ -87,6 +107,8 @@ class Manager:
 
     # ---------------------------------------------------- core logic
     def run_pool_a_round(self) -> dict:
+        if not self._internet_ok():
+            return {"total": 0, "skipped": "internet_down"}
         candidates = self.db.get_pool_candidates("a")
         if not candidates:
             log.warning("no configs in pool A to test")
@@ -106,6 +128,8 @@ class Manager:
         return stats
 
     def run_pool_b_round(self) -> dict:
+        if not self._internet_ok():
+            return {"total": 0, "skipped": "internet_down"}
         candidates = self.db.get_pool_candidates("b")
         if not candidates:
             log.warning("no configs in pool B to test yet"

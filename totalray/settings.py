@@ -53,6 +53,22 @@ DEFAULTS: dict = {
     "local_proxy": {
         "port": 2080,
     },
+    "lan_proxy": {
+        # A second SOCKS5+HTTP inbound (sing-box "mixed" type), bound to
+        # 0.0.0.0 (not just 127.0.0.1 like local_proxy) so devices
+        # elsewhere on the LAN can point straight at the Pi's own IP and
+        # a fixed port instead of relying on the DHCP default-gateway
+        # transparent-redirect setup. Kept as a *separate* inbound/port
+        # from local_proxy so nothing that already relies on
+        # 127.0.0.1:local_proxy.port (e.g. the git-over-proxy SSH config)
+        # is affected. Username/password are required since this listens
+        # on the LAN, not just localhost.
+        "enabled": True,
+        "listen": "0.0.0.0",
+        "port": 2081,
+        "username": "totalray",
+        "password": "CHANGE_ME",
+    },
     "paths": {
         "data_dir": "/var/lib/totalray",
         "rules_dir": "/etc/sing-box/rules",

@@ -82,6 +82,54 @@ def _dns_query_a(hostname: str, server: str, timeout: float = 5.0) -> str | None
         return None
 
 
+# A handful of extremely high-uptime, well-known public IPs (Cloudflare,
+# Google, Quad9, OpenDNS DNS-over-TLS ports). Used only to answer "is there
+# any IP connectivity to the outside world at all" -- deliberately raw IPs
+# (no DNS involved) and deliberately plural (any single one of these being
+# blocked/rate-limited on a given day is normal in Iran; all of them being
+# unreachable at once is a much stronger signal of a real outage).
+_WELL_KNOWN_HOSTS = [
+    ("1.1.1.1", 443),
+    ("8.8.8.8", 443),
+    ("9.9.9.9", 443),
+    ("208.67.222.222", 443),
+]
+
+
+def internet_up(timeout: float = 3.0) -> bool:
+    """Best-effort check for real upstream connectivity, independent of
+    whether any TotalRay VPN config is currently reachable.
+
+    This exists to distinguish "our configs are all bad/blocked right now"
+    from "the ISP link itself is down" -- schedulers should call this
+    before a pool-A/pool-B test round and skip the round entirely (rather
+    than let every test fail and mass-demote/remove configs) when it
+    returns False.
+
+    Connects with the tunnel-redirect SO_MARK set, the same way
+    _dns_query_a() above does, so the result reflects real outside
+    connectivity rather than whatever the TUN/active outbound happens to
+    be doing at the moment.
+    """
+    for host, port in _WELL_KNOWN_HOSTS:
+        sock = None
+        try:
+            sock = _real_socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, _SO_MARK, REDIRECT_OUTPUT_MARK_INT)
+            except OSError as exc:
+                log.debug("could not set SO_MARK on connectivity-check socket: %s", exc)
+            sock.settimeout(timeout)
+            sock.connect((host, port))
+            return True
+        except OSError:
+            continue
+        finally:
+            if sock is not None:
+                sock.close()
+    return False
+
+
 class _MarkedSocket(_real_socket):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

@@ -114,6 +114,24 @@ def build_config(settings, group: list) -> dict:
         {"type": "mixed", "tag": "local-proxy-in",
          "listen": "127.0.0.1", "listen_port": int(settings["local_proxy"]["port"])},
     ]
+    # Optional second SOCKS5+HTTP inbound, bound to the LAN (not just
+    # localhost like local-proxy-in above), so individual devices can point
+    # straight at the Pi's own IP + this port and use the tunnel directly --
+    # without the router's DHCP default-gateway redirect dance. Kept as a
+    # separate inbound/port from local-proxy-in so nothing that already
+    # relies on 127.0.0.1:local_proxy.port (e.g. the git-over-proxy SSH
+    # config) is affected by adding auth here. Always requires
+    # username/password since, unlike local-proxy-in, this is reachable
+    # from other devices on the network.
+    lan_proxy = settings["lan_proxy"]
+    if lan_proxy.get("enabled"):
+        inbounds.append({
+            "type": "mixed", "tag": "lan-proxy-in",
+            "listen": lan_proxy.get("listen", "0.0.0.0"),
+            "listen_port": int(lan_proxy["port"]),
+            "users": [{"username": lan_proxy["username"],
+                      "password": lan_proxy["password"]}],
+        })
 
     rules = [
         {"action": "sniff"},

@@ -79,6 +79,16 @@ local_proxy:
   port: 2080                  # explicit SOCKS/HTTP proxy, used as vpnman's own
                                # fallback path when a direct subscription fetch fails
 
+lan_proxy:
+  enabled: true
+  listen: "0.0.0.0"
+  port: 2081                  # SOCKS5+HTTP proxy exposed on the Pi's LAN IP --
+                               # point any device at 192.168.1.250:2081 with
+                               # these credentials to use the tunnel directly,
+                               # without touching the router's default gateway
+  username: "totalray"
+  password: "CRUD8bzN5ed3fHJz"
+
 paths:
   data_dir: "/var/lib/totalray"
   rules_dir: "/etc/sing-box/rules"
