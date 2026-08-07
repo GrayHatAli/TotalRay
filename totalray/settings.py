@@ -30,6 +30,14 @@ DEFAULTS: dict = {
         "urltest_tolerance": 50,
         "idle_timeout": "30m",
     },
+    "live_monitor": {
+        # Live connection monitoring for real-time failover on packet drops.
+        # Enabled by default to handle streaming/video call stability issues.
+        "enabled": True,
+        "check_interval_seconds": 2.0,  # How often to check connection health
+        "error_threshold": 3,  # Errors in window before triggering failover
+        "cooldown_seconds": 60.0,  # Minimum time between failovers
+    },
     "routing": {
         "iran_direct": True,
         "block_ads": False,
