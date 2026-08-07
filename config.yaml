@@ -87,7 +87,7 @@ lan_proxy:
                                # these credentials to use the tunnel directly,
                                # without touching the router's default gateway
   username: "totalray"
-  password: "CRUD8bzN5ed3fHJz"
+  password: "CHANGE_ME"
 
 paths:
   data_dir: "/var/lib/totalray"
