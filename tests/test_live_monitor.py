@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from unittest.mock import Mock, patch
 
 import pytest
@@ -135,7 +136,7 @@ class TestLiveMonitorHealthCheck:
     def test_api_unavailable_returns_healthy(self):
         """When Clash API is unavailable, don't count as error."""
         settings = Mock()
-        settings.__getitem__ = Mock(return_value={"listen": "127.0.0.1:9090", "secret": ""})
+        settings.data = {"clash_api": {"listen": "127.0.0.1:9090", "secret": ""}}
         db = Mock()
         
         monitor = LiveMonitor(settings, db)
@@ -148,17 +149,19 @@ class TestLiveMonitorHealthCheck:
     def test_short_lived_connections_detected_as_errors(self):
         """Multiple short-lived connections indicate degradation."""
         settings = Mock()
-        settings.__getitem__ = Mock(return_value={"listen": "127.0.0.1:9090", "secret": ""})
+        settings.data = {"clash_api": {"listen": "127.0.0.1:9090", "secret": ""}}
         db = Mock()
         
         monitor = LiveMonitor(settings, db)
         
-        # Create connections that all lasted less than 1 second
+        # Create connections with very recent start times (guaranteed < 1s old)
+        # Use a fixed timestamp format that will parse correctly
         now = time.time()
         connections = []
         for i in range(5):
+            # Use a timestamp just milliseconds ago to ensure duration < 1s
             conn = {
-                "start": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 0.5)),
+                "start": datetime.fromtimestamp(now - 0.1).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
                 "download": 100,
                 "upload": 50
             }
@@ -166,13 +169,13 @@ class TestLiveMonitorHealthCheck:
         
         with patch.object(monitor, '_get_connections', return_value=connections):
             is_healthy, errors = monitor._check_connection_health()
-            # Should detect errors due to multiple short-lived connections
+            # Should detect errors due to multiple short-lived connections (>=3 triggers error)
             assert errors >= 1
 
     def test_zero_throughput_not_counted_immediately(self):
         """Zero throughput on new connections shouldn't immediately trigger errors."""
         settings = Mock()
-        settings.__getitem__ = Mock(return_value={"listen": "127.0.0.1:9090", "secret": ""})
+        settings.data = {"clash_api": {"listen": "127.0.0.1:9090", "secret": ""}}
         db = Mock()
         
         monitor = LiveMonitor(settings, db)
@@ -196,7 +199,7 @@ class TestLiveMonitorHealthCheck:
     def test_computes_throughput_metrics(self):
         """Health check should compute average throughput metrics."""
         settings = Mock()
-        settings.__getitem__ = Mock(return_value={"listen": "127.0.0.1:9090", "secret": ""})
+        settings.data = {"clash_api": {"listen": "127.0.0.1:9090", "secret": ""}}
         db = Mock()
         
         monitor = LiveMonitor(settings, db, check_interval=0.1)
@@ -223,7 +226,7 @@ class TestLiveMonitorFailover:
     def test_get_next_best_server_excludes_current(self):
         """Next best server should not be the current server."""
         settings = Mock()
-        settings.__getitem__ = Mock(return_value={"listen": "127.0.0.1:9090", "secret": ""})
+        settings.data = {"clash_api": {"listen": "127.0.0.1:9090", "secret": ""}}
         db = Mock()
         
         # Mock pool-B configs with latencies
@@ -246,7 +249,7 @@ class TestLiveMonitorFailover:
     def test_get_next_best_server_skips_poor_latency(self):
         """Servers with poor latency (>2000ms) should be skipped."""
         settings = Mock()
-        settings.__getitem__ = Mock(return_value={"listen": "127.0.0.1:9090", "secret": ""})
+        settings.data = {"clash_api": {"listen": "127.0.0.1:9090", "secret": ""}}
         db = Mock()
         
         # Mock pool-B configs where best server has poor latency
@@ -265,7 +268,7 @@ class TestLiveMonitorFailover:
     def test_cooldown_prevents_rapid_failover(self):
         """Cooldown period should prevent rapid successive failovers."""
         settings = Mock()
-        settings.__getitem__ = Mock(return_value={"listen": "127.0.0.1:9090", "secret": ""})
+        settings.data = {"clash_api": {"listen": "127.0.0.1:9090", "secret": ""}}
         db = Mock()
         
         monitor = LiveMonitor(settings, db, cooldown_seconds=60.0)

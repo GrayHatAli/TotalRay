@@ -46,7 +46,7 @@ class QualityWindow:
         while self.samples and self.samples[0].timestamp < cutoff:
             old_sample = self.samples.popleft()
             if old_sample.timestamp < cutoff and old_sample.errors > 0:
-                self.error_count = max(0, self.error_count - 1)
+                self.error_count = max(0, self.error_count - old_sample.errors)
 
     def add_error(self) -> None:
         self.error_count += 1
@@ -92,8 +92,8 @@ class LiveMonitor:
         self.error_threshold = error_threshold
         self.cooldown_seconds = cooldown_seconds
 
-        self._clash_host = settings["clash_api"]["listen"]
-        self._clash_secret = settings["clash_api"].get("secret", "")
+        self._clash_host = settings.data["clash_api"]["listen"]
+        self._clash_secret = settings.data["clash_api"].get("secret", "")
         self._headers = {}
         if self._clash_secret:
             self._headers["Authorization"] = f"Bearer {self._clash_secret}"
