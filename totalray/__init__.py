@@ -1,4 +1,4 @@
-"""TotalRay - sing-box client manager (renamed from vpnman)
+"""TotalRay - sing-box client manager.
 
 Package top-level metadata and simple version string.
 """

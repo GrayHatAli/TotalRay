@@ -1,4 +1,4 @@
-"""Group latency testing for TotalRay (copied from vpnman.tester)."""
+"""Group latency testing for TotalRay."""
 from __future__ import annotations
 
 import json

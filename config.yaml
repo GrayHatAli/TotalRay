@@ -76,7 +76,7 @@ clash_api:
   secret: ""                  # required if you set listen to 0.0.0.0
 
 local_proxy:
-  port: 2080                  # explicit SOCKS/HTTP proxy, used as vpnman's own
+  port: 2080                  # explicit SOCKS/HTTP proxy, used as TotalRay's own
                                # fallback path when a direct subscription fetch fails
 
 lan_proxy:

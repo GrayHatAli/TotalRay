@@ -1,1 +1,0 @@
-{"ts": "2026-07-24T12:34:17+0330", "method": "GET", "url": "http://127.0.0.1:9", "kwargs": {}, "error": "ConnectionError(MaxRetryError('HTTPConnectionPool(host=\\'127.0.0.1\\', port=9): Max retries exceeded with url: / (Caused by NewConnectionError(\"HTTPConnection(host=\\'127.0.0.1\\', port=9): Failed to establish a new connection: [Errno 61] Connection refused\"))'))"}
