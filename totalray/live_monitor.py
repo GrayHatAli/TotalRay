@@ -11,6 +11,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Callable
 
 import requests
@@ -37,10 +38,15 @@ class QualityWindow:
 
     def add_sample(self, sample: ConnectionSample) -> None:
         self.samples.append(sample)
+        if sample.errors > 0:
+            self.error_count += sample.errors
+            self.last_error_time = sample.timestamp
         # Clean old errors (older than 30 seconds)
         cutoff = time.time() - 30
-        if sample.timestamp > self.last_error_time:
-            pass  # errors are tracked separately
+        while self.samples and self.samples[0].timestamp < cutoff:
+            old_sample = self.samples.popleft()
+            if old_sample.timestamp < cutoff and old_sample.errors > 0:
+                self.error_count = max(0, self.error_count - 1)
 
     def add_error(self) -> None:
         self.error_count += 1
@@ -53,10 +59,10 @@ class QualityWindow:
         cutoff = time.time() - window_seconds
         return sum(1 for s in self.samples if s.timestamp > cutoff and s.errors > 0)
 
-    def is_degraded(self) -> bool:
+    def is_degraded(self, threshold: int = 3) -> bool:
         """Check if connection quality is degraded based on recent errors."""
         recent_errors = self.get_recent_errors(10)
-        return recent_errors >= 3
+        return recent_errors >= threshold
 
 
 class LiveMonitor:
@@ -155,32 +161,51 @@ class LiveMonitor:
         now = time.time()
         error_count = 0
         active_count = len(connections)
+        total_download = 0
+        total_upload = 0
 
-        # Analyze connection patterns
-        closed_count = 0
-        for conn in connections[-50:]:  # Check last 50 connections
+        # Analyze connection patterns - check last 50 connections
+        short_lived_count = 0
+        zero_throughput_count = 0
+        
+        for conn in connections[-50:]:
             # Look for connections that closed very quickly (< 1s)
             # which often indicates connection failures
-            start_time = conn.get("start", "")
-            if start_time:
+            start_time_str = conn.get("start", "")
+            duration = 0.0
+            if start_time_str:
                 try:
-                    # Parse ISO timestamp if available
-                    pass
-                except (ValueError, TypeError):
+                    # Parse ISO timestamp (e.g., "2024-01-15T10:30:00Z")
+                    start_dt = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                    start_ts = start_dt.timestamp()
+                    duration = now - start_ts
+                    
+                    # Connection lasting less than 1 second with data transfer
+                    # likely indicates a failed/retried connection
+                    if duration < 1.0:
+                        short_lived_count += 1
+                        if short_lived_count >= 3:  # Multiple short-lived = degradation
+                            error_count += 1
+                except (ValueError, TypeError, AttributeError):
+                    # Can't parse timestamp, skip duration check
                     pass
 
-            # Check for zero throughput on long-lived connections
-            download = conn.get("download", 0)
-            upload = conn.get("upload", 0)
-            if download == 0 and upload == 0:
-                # Connection with no data transfer might be stuck
-                pass
+            # Check for zero throughput on connections that should be active
+            download = conn.get("download", 0) or 0
+            upload = conn.get("upload", 0) or 0
+            total_download += download
+            total_upload += upload
+            
+            # If connection has been alive for > 5 seconds but has zero throughput,
+            # it might be stuck (but don't count streaming idle periods as errors)
+            if duration > 5.0 and download == 0 and upload == 0:
+                zero_throughput_count += 1
 
-        # Create sample
+        # Create sample with computed metrics
         sample = ConnectionSample(
             timestamp=now,
-            download_speed=0,
-            upload_speed=0,
+            download_speed=total_download // max(1, active_count),
+            upload_speed=total_upload // max(1, active_count),
             active_connections=active_count,
             errors=error_count,
         )
@@ -192,7 +217,9 @@ class LiveMonitor:
         else:
             self._consecutive_errors = max(0, self._consecutive_errors - 1)
 
-        is_healthy = not self._quality.is_degraded()
+        # Use configurable threshold for degradation detection
+        threshold = self.error_threshold
+        is_healthy = not self._quality.is_degraded(threshold)
         return is_healthy, error_count
 
     def _try_ping_fallback(self, tag: str) -> bool:
