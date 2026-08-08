@@ -9,6 +9,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from . import builder, net, rulesets, subfetch
 from .tester import GroupTester
 from . import traffic
+from .live_monitor import create_monitor
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +20,36 @@ class Manager:
         self.db = db
         self._job_lock = threading.Lock()
         self._internet_was_down = False
+        self._live_monitor = None
+
+    def start_live_monitor(self) -> None:
+        """Start the live connection monitor for real-time failover.
+        
+        This monitor watches active connections and automatically switches
+        to a backup server when it detects packet drops or connection failures,
+        providing much faster reaction than the periodic pool-B test rounds.
+        
+        Only starts if enabled in config (live_monitor.enabled).
+        """
+        lm_cfg = self.settings.data.get("live_monitor", {})
+        if not lm_cfg.get("enabled", True):
+            log.info("Live connection monitor disabled in configuration")
+            return
+        
+        if self._live_monitor is not None:
+            log.warning("Live monitor already running")
+            return
+        
+        self._live_monitor = create_monitor(self.settings, self.db)
+        
+        # Set up callback to log failovers
+        def on_failover(new_tag: str) -> None:
+            log.info("Live monitor triggered failover to %s", new_tag)
+        
+        self._live_monitor.set_failover_callback(on_failover)
+        self._live_monitor.start()
+        log.info("Live connection monitor enabled (checks every %.1fs, failover on degradation)",
+                 lm_cfg.get("check_interval_seconds", 2.0))
 
     def _internet_ok(self) -> bool:
         """Guard for pool-A/pool-B test rounds: if the ISP link itself is
@@ -160,6 +191,9 @@ def run_daemon(settings, db):
     manager = Manager(settings, db)
     manager.bootstrap()
 
+    # Start live connection monitor for real-time failover on packet drops
+    manager.start_live_monitor()
+
     sch = settings["schedule"]
     scheduler = BackgroundScheduler()
     scheduler.add_job(manager.job_update_subs, "interval",
@@ -191,3 +225,5 @@ def run_daemon(settings, db):
         pass
     finally:
         scheduler.shutdown(wait=False)
+        if manager._live_monitor:
+            manager._live_monitor.stop()

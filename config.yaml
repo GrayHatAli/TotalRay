@@ -46,6 +46,14 @@ proxy_group:
   urltest_tolerance: 150       # minimum edge (ms) needed to switch to a better server
   idle_timeout: "30m"
 
+live_monitor:
+  enabled: true               # NEW: real-time connection monitoring with automatic failover
+                              # detects packet drops/connection failures and switches servers
+                              # much faster than periodic pool-B test rounds (every 3 min)
+  check_interval_seconds: 2.0 # how often to poll Clash API for connection stats
+  error_threshold: 3          # errors in sliding window before triggering failover
+  cooldown_seconds: 60.0      # minimum time between failovers (prevents rapid switching)
+
 routing:
   iran_direct: true           # Iranian domains/IPs -> direct connection
   block_ads: false            # block ads/malware (security rule-set)
