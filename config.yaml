@@ -1,5 +1,5 @@
 # ══════════════════════════════════════════════════════════════
-#  pi-vpn-gateway - Raspberry Pi VPN client manager settings
+#  TotalRay - VPN gateway / remote proxy manager settings
 # ══════════════════════════════════════════════════════════════
 
 # Subscription links - any number of them (plain string or name+url)
@@ -90,10 +90,14 @@ local_proxy:
 lan_proxy:
   enabled: true
   listen: "0.0.0.0"
-  port: 2081                  # SOCKS5+HTTP proxy exposed on the Pi's LAN IP --
-                               # point any device at 192.168.1.250:2081 with
+  port: 2081                  # SOCKS5+HTTP proxy exposed on this box's IP --
+                               # point any device at <this-box-ip>:2081 with
                                # these credentials to use the tunnel directly,
-                               # without touching the router's default gateway
+                               # without touching the router's default gateway.
+                               # On a remote/cloud deployment (no LAN to be a
+                               # gateway for) this is the primary way clients
+                               # connect: point devices at the box's public IP
+                               # instead of installing v2ray-style configs.
   username: "totalray"
   password: "CHANGE_ME"
 
