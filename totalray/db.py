@@ -100,6 +100,25 @@ class Database:
             return [dict(r) for r in self._conn.execute(
                 "SELECT * FROM subscriptions ORDER BY id")]
 
+    def configs_health_by_sub(self) -> dict:
+        """Per-subscription count of configs that are still alive (not
+        permanently removed) right now - either pool A (candidate, still
+        being tested) or pool B (verified). Compared against a
+        subscription's last_count (how many configs its last fetch
+        actually returned), this tells apart two very different
+        situations that both show up as "no working configs":
+          - last_count == 0: the fetch/parse itself found nothing
+            (dead link, panel returned an empty/invalid response, etc.)
+          - last_count > 0 but healthy == 0: configs were parsed fine,
+            but every one of them failed our real-connectivity testing
+            and got removed (fail_threshold reached).
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT source_sub, COUNT(*) AS c FROM configs"
+                " WHERE removed=0 GROUP BY source_sub").fetchall()
+        return {r["source_sub"]: r["c"] for r in rows}
+
     def enabled_subscriptions(self) -> list:
         """Backwards-compatible alias for older subfetch.py code."""
         return self.list_subscriptions()

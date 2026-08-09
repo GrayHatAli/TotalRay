@@ -342,18 +342,24 @@ def cmd_status(args):
     print(_title_bar("Subscriptions"))
     subs = db.list_subscriptions()
     sub_minutes = int(sched.get("sub_update_minutes", 30))
+    health_by_sub = db.configs_health_by_sub()
     sub_rows = []
     for i, sub in enumerate(subs, 1):
         count = sub.get("last_count")
         count = count if count is not None else "-"
+        healthy = health_by_sub.get(sub["id"], 0)
         if sub.get("last_status") and sub["last_status"] != "ok":
             last_round = "failed"
         else:
             last_round = _fmt_hhmm(sub.get("last_update"))
         next_round = _next_round(sub.get("last_update"), sub_minutes) if sub.get("enabled", 1) else "-"
-        sub_rows.append([i, _truncate(sub["url"], 38), count, last_round, next_round])
+        sub_rows.append([i, _truncate(sub["url"], 38), count, healthy, last_round, next_round])
     if sub_rows:
-        print(_fmt_table(["No", "Url", "Configs", "Last Round", "Next Round"], sub_rows))
+        print(_fmt_table(["No", "Url", "Configs", "Healthy", "Last Round", "Next Round"], sub_rows))
+        print("  Configs = how many the last fetch parsed; Healthy = how many of those")
+        print("  are still alive right now (pool A or B, not removed). Configs=0 means")
+        print("  the fetch itself found nothing; Configs>0 but Healthy=0 means they were")
+        print("  parsed fine but every one failed real-connectivity testing.")
     else:
         print("  (no subscriptions configured)")
 
