@@ -354,6 +354,17 @@ _PARSERS = {
 
 def parse_link(link: str) -> dict:
     link = link.strip()
+    # Some subscription sources embed links inside HTML (or a template
+    # that HTML-escapes them) without decoding entities back out, so the
+    # query string arrives as "...&amp;pbk=...&amp;sni=..." instead of
+    # "...&pbk=...&sni=...". Since that's not a real '&' separator,
+    # urllib silently folds every later param into the first key's
+    # value - most visibly, reality links losing "pbk" and getting
+    # rejected as "reality without a public_key" even though the key is
+    # right there in the raw text. Unescape before parsing so this
+    # doesn't masquerade as corrupt/unsupported data.
+    if "&amp;" in link:
+        link = link.replace("&amp;", "&")
     for scheme, parser in _PARSERS.items():
         if link.lower().startswith(scheme):
             outbound, name = parser(link)
@@ -366,22 +377,40 @@ def parse_link(link: str) -> dict:
     raise ParseError(f"unsupported scheme: {link[:32]}")
 
 
-def parse_many(links: list) -> tuple[list, int]:
+def parse_many(links: list) -> tuple[list, int, dict]:
+    """Returns (items, bad_count, reasons).
+
+    reasons groups rejections by category (the part of the ParseError
+    message before the first ':' - e.g. "invalid vless: missing uuid"
+    groups under "invalid vless") so a caller can tell at a glance
+    whether 23 rejected links were 23 different one-off malformed
+    entries, or e.g. 23 copies of "unsupported hysteria2 obfs: salamander"
+    (a parser limitation, not corrupt data). Each category keeps a count
+    and one example message.
+    """
     items, bad = [], 0
+    reasons: dict = {}
     seen = set()
     for link in links:
         try:
             item = parse_link(link)
         except ParseError as exc:
             bad += 1
-            log.debug("rejected link: %s", exc)
+            msg = str(exc)
+            category = msg.split(":", 1)[0].strip()
+            entry = reasons.setdefault(category, {"count": 0, "example": msg})
+            entry["count"] += 1
+            log.debug("rejected link: %s", msg)
             continue
         except Exception as exc:  # noqa: BLE001
             bad += 1
+            msg = f"unexpected error: {exc}"
+            entry = reasons.setdefault("unexpected error", {"count": 0, "example": msg})
+            entry["count"] += 1
             log.warning("unexpected error parsing a link, skipping it: %s", exc)
             continue
         if item["fingerprint"] in seen:
             continue
         seen.add(item["fingerprint"])
         items.append(item)
-    return items, bad
+    return items, bad, reasons

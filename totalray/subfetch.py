@@ -31,14 +31,35 @@ def _try_b64_whole(text: str) -> str:
     return decoded if any(s in decoded for s in SUPPORTED_SCHEMES) else text
 
 
-def extract_links(text: str) -> list:
+def extract_links(text: str) -> tuple[list, int, list]:
+    """Returns (links, skipped_count, skipped_scheme_samples).
+
+    A line only reaches parse_many() if it starts with a scheme we know
+    (SUPPORTED_SCHEMES). Anything else - a genuinely different protocol
+    (ssr://, socks://, a WireGuard-style sub, ...), a comment/blank line,
+    or plain noise - is dropped right here and never shows up in the
+    "N invalid" count logged later, because that count only covers links
+    we recognized but then failed to parse. skipped_scheme_samples keeps
+    a few example prefixes so it's possible to tell whether the dropped
+    lines were a real protocol we just don't support yet, or junk.
+    """
     text = _try_b64_whole(text)
     links = []
-    for line in text.splitlines():
-        line = line.strip()
+    skipped = 0
+    samples: list = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
         if line.lower().startswith(SUPPORTED_SCHEMES):
             links.append(line)
-    return links
+            continue
+        skipped += 1
+        if len(samples) < 5:
+            prefix = line.split("://", 1)[0] if "://" in line else line[:20]
+            if prefix not in samples:
+                samples.append(prefix)
+    return links, skipped, samples
 
 
 def _one_pass(url: str, timeout: int, proxies: dict | None = None,
@@ -116,8 +137,8 @@ def update_all(settings, db) -> dict:
             text = fetch_subscription(
                 settings, sub["url"], proxy_port=proxy_port, dns_server=dns_server,
                 extra_headers=headers_by_url.get(sub["url"]))
-            links = extract_links(text)
-            items, bad = parse_many(links)
+            links, skipped_scheme, scheme_samples = extract_links(text)
+            items, bad, reasons = parse_many(links)
             added = db.sync_configs(sub["id"], items)
             db.set_sub_status(sub["id"], "ok", len(items))
             summary["subs_ok"] += 1
@@ -125,6 +146,18 @@ def update_all(settings, db) -> dict:
             summary["bad_links"] += bad
             log.info("sub #%s: %d links (%d new, %d invalid)",
                      sub["id"], len(items), added, bad)
+            if reasons:
+                breakdown = ", ".join(
+                    f"{cat} x{info['count']} (e.g. {info['example']})"
+                    for cat, info in sorted(
+                        reasons.items(), key=lambda kv: -kv[1]["count"]))
+                log.info("sub #%s: rejected-link breakdown -> %s",
+                         sub["id"], breakdown)
+            if skipped_scheme:
+                log.info(
+                    "sub #%s: %d line(s) skipped before parsing - unrecognized"
+                    " scheme/protocol, not counted as invalid (samples: %s)",
+                    sub["id"], skipped_scheme, ", ".join(scheme_samples) or "-")
         except Exception as exc:  # noqa: BLE001
             db.set_sub_status(sub["id"], f"error: {exc}")
             summary["subs_failed"] += 1
