@@ -5,7 +5,7 @@ import logging
 import time
 
 
-from .parsers import SUPPORTED_SCHEMES, parse_many
+from .parsers import SUPPORTED_SCHEMES, parse_many, is_singbox_config, parse_singbox_config
 from . import net
 from .http_client import client_for
 
@@ -137,8 +137,21 @@ def update_all(settings, db) -> dict:
             text = fetch_subscription(
                 settings, sub["url"], proxy_port=proxy_port, dns_server=dns_server,
                 extra_headers=headers_by_url.get(sub["url"]))
-            links, skipped_scheme, scheme_samples = extract_links(text)
-            items, bad, reasons = parse_many(links)
+            if is_singbox_config(text):
+                # Some panels serve a full sing-box client config instead
+                # of a vmess://.../vless://... link list (Hiddify/NekoBox-
+                # style). Pull outbounds straight out of it rather than
+                # running it through the URI-link pipeline, which would
+                # find nothing and misreport the whole subscription as
+                # empty/broken.
+                items, bad, reasons = parse_singbox_config(text)
+                skipped_scheme, scheme_samples = 0, []
+                log.info("sub #%s: detected a full sing-box client config"
+                         " (not a link list) - extracted outbounds directly",
+                         sub["id"])
+            else:
+                links, skipped_scheme, scheme_samples = extract_links(text)
+                items, bad, reasons = parse_many(links)
             added = db.sync_configs(sub["id"], items)
             db.set_sub_status(sub["id"], "ok", len(items))
             summary["subs_ok"] += 1

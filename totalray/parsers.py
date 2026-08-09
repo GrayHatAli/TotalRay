@@ -341,6 +341,78 @@ def _parse_tuic(link: str):
     return ob, _unquote(url.fragment)
 
 
+# Outbound "type" values we know how to test/build against. A full
+# sing-box client config's "outbounds" array also contains selector/
+# urltest/direct/block/dns entries describing the client's own local
+# routing rather than an actual server, so this set doubles as the
+# filter for "is this entry a real proxy leg".
+SINGBOX_OUTBOUND_TYPES = {"vmess", "vless", "trojan", "shadowsocks", "hysteria2", "tuic"}
+
+
+def is_singbox_config(text: str) -> bool:
+    """Cheap check for whether a subscription returned a full sing-box
+    client config (some panels serve this directly, for Hiddify/NekoBox-
+    style clients) instead of a plain list of vmess://.../vless://...
+    links."""
+    stripped = text.lstrip()
+    if not stripped.startswith("{"):
+        return False
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(data, dict) and isinstance(data.get("outbounds"), list)
+
+
+def parse_singbox_config(text: str) -> tuple[list, int, dict]:
+    """Pull proxy outbounds directly out of a full sing-box client
+    config's "outbounds" array, instead of expecting a link list.
+
+    Each outbound is already in sing-box's own JSON shape - unlike the
+    vmess://.../vless://... parsers above, there's no protocol-specific
+    decoding to do. We just filter down to entries that are an actual
+    proxy leg (a known outbound type with a server/server_port) and
+    drop the rest (selector/urltest/direct/block/dns/etc., which
+    describe the client's own local routing, not a server to test).
+    """
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return [], 0, {}
+    obs = data.get("outbounds") if isinstance(data, dict) else None
+    if not isinstance(obs, list):
+        return [], 0, {}
+
+    items, bad = [], 0
+    reasons: dict = {}
+    seen = set()
+    for ob in obs:
+        if not isinstance(ob, dict):
+            continue
+        typ = ob.get("type")
+        if typ not in SINGBOX_OUTBOUND_TYPES:
+            continue  # not a proxy leg (selector/urltest/direct/block/dns/...)
+        if "server" not in ob or "server_port" not in ob:
+            bad += 1
+            category = f"{typ} outbound missing server/server_port"
+            entry = reasons.setdefault(category, {"count": 0, "example": category})
+            entry["count"] += 1
+            continue
+        outbound = {k: v for k, v in ob.items() if k != "tag"}
+        fp = fingerprint(outbound)
+        if fp in seen:
+            continue
+        seen.add(fp)
+        name = ob.get("tag") or f"{ob['server']}:{ob['server_port']}"
+        items.append({
+            "fingerprint": fp,
+            "name": str(name)[:120],
+            "link": "",  # no URI form - this came from a JSON config
+            "outbound": outbound,
+        })
+    return items, bad, reasons
+
+
 _PARSERS = {
     "vmess://": _parse_vmess,
     "vless://": _parse_vless,
