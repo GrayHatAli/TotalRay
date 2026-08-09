@@ -6,12 +6,15 @@ connection failures, and triggering immediate failover to backup servers.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
+import tempfile
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable
 
 import requests
@@ -105,6 +108,42 @@ class LiveMonitor:
         self._failover_count = 0
         self._consecutive_errors = 0
         self._on_failover: Callable[[str], None] | None = None
+        self._started_at = 0.0
+        self._last_status_write = 0.0
+        data_dir = getattr(settings, "data_dir", "/var/lib/totalray")
+        self._status_path = os.path.join(data_dir, "live_monitor_status.json")
+
+    def _write_status(self, extra: dict | None = None) -> None:
+        """Write a small JSON snapshot to disk so a separate short-lived
+        CLI process (totalray status) can report on this thread's
+        state without needing IPC into the running daemon.
+        """
+        now = time.time()
+        payload = {
+            "running": self._running,
+            "started_at": self._started_at or None,
+            "last_check": now,
+            "failover_count": self._failover_count,
+            "last_failover": self._last_failover or None,
+            "consecutive_errors": self._consecutive_errors,
+            "check_interval": self.check_interval,
+        }
+        if extra:
+            payload.update(extra)
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                dir=os.path.dirname(self._status_path) or ".", prefix=".lm-")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            # tempfile.mkstemp always creates the file mode 0600 regardless of
+            # umask; match the rest of /var/lib/totalray (e.g. totalray.db,
+            # totalray.log) which are group-readable, so status checks work
+            # for anyone in the totalray group, not just root/sudo.
+            os.chmod(tmp_path, 0o664)
+            os.replace(tmp_path, self._status_path)
+        except OSError as exc:
+            log.debug("could not write live-monitor status file: %s", exc)
+        self._last_status_write = now
 
     def set_failover_callback(self, callback: Callable[[str], None]) -> None:
         """Set callback to be called when failover occurs.
@@ -268,10 +307,12 @@ class LiveMonitor:
                 new_tag,
                 self._failover_count,
             )
+            self._write_status({"last_target": new_tag})
             if self._on_failover:
                 self._on_failover(new_tag)
             return True
         log.error("Live failover to %s failed: %s", new_tag, msg)
+        self._write_status({"last_failover_error": msg})
         return False
 
     def _monitor_loop(self) -> None:
@@ -280,6 +321,9 @@ class LiveMonitor:
 
         while self._running:
             try:
+                if time.time() - self._last_status_write >= 10:
+                    self._write_status()
+
                 # Get current server
                 proxy_info = self._get_proxy_info()
                 if not proxy_info:
@@ -328,6 +372,7 @@ class LiveMonitor:
                 log.exception("Error in monitor loop: %s", exc)
                 time.sleep(self.check_interval)
 
+        self._write_status()
         log.info("Live connection monitor stopped")
 
     def start(self) -> None:
@@ -335,6 +380,8 @@ class LiveMonitor:
         if self._running:
             return
         self._running = True
+        self._started_at = time.time()
+        self._write_status()
         self._thread = threading.Thread(
             target=self._monitor_loop, name="LiveMonitor", daemon=True
         )
@@ -343,6 +390,7 @@ class LiveMonitor:
     def stop(self) -> None:
         """Stop the monitoring thread."""
         self._running = False
+        self._write_status()
         if self._thread:
             self._thread.join(timeout=5)
             self._thread = None

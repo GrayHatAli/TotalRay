@@ -7,6 +7,8 @@ import logging.handlers
 import os
 import sys
 import json
+import time
+from datetime import datetime, timedelta
 
 from . import __version__
 
@@ -128,6 +130,117 @@ def cmd_run(args):
     db.close()
 
 
+def _title_bar(label: str, width: int = 70) -> str:
+    text = f" {label} "
+    pad = max(0, width - len(text))
+    left = pad // 2
+    right = pad - left
+    return ("-" * left) + text + ("-" * right)
+
+
+def _truncate(value, n: int) -> str:
+    value = str(value)
+    return value if len(value) <= n else value[: max(0, n - 3)] + "..."
+
+
+def _fmt_table(headers, rows) -> str:
+    """Render a simple bordered/pipe table, widths sized to content, with a
+    separator line after the header and after every data row."""
+    widths = [len(str(h)) for h in headers]
+    for r in rows:
+        for i, cell in enumerate(r):
+            widths[i] = max(widths[i], len(str(cell)))
+
+    def _row(cells) -> str:
+        return "| " + " | ".join(str(c).center(w) for c, w in zip(cells, widths)) + " |"
+
+    sep = "|" + "|".join("-" * (w + 2) for w in widths) + "|"
+    lines = [_row(headers), sep]
+    for r in rows:
+        lines.append(_row(r))
+        lines.append(sep)
+    return "\n".join(lines)
+
+
+def _parse_db_ts(ts_str):
+    """Parse a SQLite datetime('now') string ('YYYY-MM-DD HH:MM:SS', UTC)."""
+    if not ts_str:
+        return None
+    try:
+        return datetime.strptime(str(ts_str)[:19], "%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return None
+
+
+def _fmt_hhmm(ts_str) -> str:
+    dt = _parse_db_ts(ts_str)
+    return dt.strftime("%H:%M") if dt else "-"
+
+
+def _next_round(ts_str, minutes: int) -> str:
+    dt = _parse_db_ts(ts_str)
+    if not dt:
+        return "-"
+    return (dt + timedelta(minutes=minutes)).strftime("%H:%M")
+
+
+def _fmt_ago(epoch_ts) -> str:
+    if not epoch_ts:
+        return "-"
+    try:
+        secs = time.time() - float(epoch_ts)
+    except (TypeError, ValueError):
+        return "-"
+    secs = max(0, secs)
+    if secs < 60:
+        return f"{int(secs)}s ago"
+    if secs < 3600:
+        return f"{int(secs // 60)}m ago"
+    return f"{int(secs // 3600)}h ago"
+
+
+def _read_live_monitor_status(settings) -> dict | None:
+    path = os.path.join(settings.data_dir, "live_monitor_status.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def _get_traffic_totals(settings):
+    """Cumulative download/upload since sing-box started, from the Clash
+    API's /connections endpoint (downloadTotal/uploadTotal fields)."""
+    from .http_client import client_for
+
+    client = client_for(settings)
+    clash = settings["clash_api"]
+    host, _, port = clash["listen"].partition(":")
+    host = host or "127.0.0.1"
+    headers = {}
+    if clash.get("secret"):
+        headers["Authorization"] = f"Bearer {clash['secret']}"
+    try:
+        resp = client.get(f"http://{host}:{port}/connections", headers=headers, timeout=3)
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("downloadTotal", 0), data.get("uploadTotal", 0)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _human_bytes(n) -> str:
+    try:
+        n = int(n or 0)
+    except (TypeError, ValueError):
+        return str(n)
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if n < 1024:
+            return f"{n} {unit}"
+        n = n // 1024
+    return f"{n} PB"
+
+
 def _live_connection_status(settings, db) -> str:
     """Ask sing-box's Clash API which server the 'auto' group actually has
     selected right now, then independently check the apparent public exit
@@ -201,42 +314,88 @@ def cmd_status(args):
     stats = db.stats()
     last_a = stats["last_test_a"]
     last_b = stats["last_test_b"]
-    print("-- overview --------------------------")
-    print(f"  {_live_connection_status(settings, db)}")
-    print(f"  subscriptions : {stats['subs']}")
-    print(f"  configs       : {stats['total']} total |"
+    sched = settings["schedule"]
+
+    # -- overview --------------------------------------------------------
+    print(_title_bar("overview"))
+    status_line = _live_connection_status(settings, db)
+    totals = _get_traffic_totals(settings)
+    if totals:
+        status_line += f"  (Down: {_human_bytes(totals[0])} / Up: {_human_bytes(totals[1])})"
+    print(status_line)
+
+    lm = _read_live_monitor_status(settings)
+    if lm:
+        state = "active" if lm.get("running") else "stopped"
+        heartbeat_gap = time.time() - lm["last_check"] if lm.get("last_check") else None
+        stale = ""
+        if lm.get("running") and heartbeat_gap is not None and heartbeat_gap > max(30, lm.get("check_interval", 2) * 10):
+            stale = " (stale - no recent heartbeat, check the service)"
+        print(f"live monitor  : {state}{stale} |"
+              f" {lm.get('failover_count', 0)} failovers |"
+              f" last failover: {_fmt_ago(lm.get('last_failover'))}")
+    else:
+        print("live monitor  : status unknown (no heartbeat file yet - restart totalray.service)")
+
+    # -- subscriptions ----------------------------------------------------
+    print()
+    print(_title_bar("Subscriptions"))
+    subs = db.list_subscriptions()
+    sub_minutes = int(sched.get("sub_update_minutes", 30))
+    sub_rows = []
+    for i, sub in enumerate(subs, 1):
+        count = sub.get("last_count")
+        count = count if count is not None else "-"
+        if sub.get("last_status") and sub["last_status"] != "ok":
+            last_round = "failed"
+        else:
+            last_round = _fmt_hhmm(sub.get("last_update"))
+        next_round = _next_round(sub.get("last_update"), sub_minutes) if sub.get("enabled", 1) else "-"
+        sub_rows.append([i, _truncate(sub["url"], 38), count, last_round, next_round])
+    if sub_rows:
+        print(_fmt_table(["No", "Url", "Configs", "Last Round", "Next Round"], sub_rows))
+    else:
+        print("  (no subscriptions configured)")
+
+    print()
+    print(f"configs : {stats['total']} total |"
           f" pool A (candidates): {stats['pool_a']} |"
           f" pool B (verified): {stats['pool_b']} |"
           f" removed: {stats['removed']}")
+
+    # -- Pool A -------------------------------------------------------------
+    print()
+    print(_title_bar("Pool A"))
+    pool_a_minutes = int(sched.get("pool_a_test_minutes", 15))
     if last_a:
-        print(f"  last pool-A round: {last_a['ts']} - {last_a['ok']} promoted,"
-              f" {last_a['failed']} still failing, {last_a['removed']} removed")
-    if last_b:
-        print(f"  last pool-B round: {last_b['ts']} - {last_b['ok']} still healthy,"
-              f" {last_b['failed']} demoted, {last_b['removed']} removed")
-    top = db.top_configs(10)
-    if top:
-        print("\n-- top 10 verified configs (lowest real latency) --")
-        for i, row in enumerate(top, 1):
-            print(f"  {i:>2}. {row['last_delay']:>5} ms  {row['name']}")
+        rows_a = [[last_a["total"], last_a["ok"], last_a["removed"],
+                   _fmt_hhmm(last_a["ts"]), _next_round(last_a["ts"], pool_a_minutes)]]
+        print(_fmt_table(["Total", "Promoted", "Removed", "Last Round", "Next Round"], rows_a))
+    else:
+        print("  (no pool-A test rounds yet)")
     worst = db.worst_configs(5)
     if worst:
         print("\n-- close to removal --")
         for row in worst:
             print(f"  score {row['score']:>3}  [pool {row['pool']}]  {row['name']}")
 
-    # per-device section: prefer persisted totals from the DB, fallback to live sampler
-    def _human(n: int) -> str:
-        try:
-            n = int(n or 0)
-        except Exception:
-            return str(n)
-        for unit in ["B", "KB", "MB", "GB", "TB"]:
-            if n < 1024:
-                return f"{n}{unit}"
-            n = n // 1024
-        return f"{n}PB"
+    # -- Pool B -------------------------------------------------------------
+    print()
+    print(_title_bar("Pool B"))
+    pool_b_minutes = int(sched.get("pool_b_test_minutes", 3))
+    if last_b:
+        rows_b = [[last_b["total"], last_b["ok"], last_b["failed"],
+                   _fmt_hhmm(last_b["ts"]), _next_round(last_b["ts"], pool_b_minutes)]]
+        print(_fmt_table(["Total", "Healthy", "Demoted", "Last Round", "Next Round"], rows_b))
+    else:
+        print("  (no pool-B test rounds yet)")
+    top = db.top_configs(5)
+    if top:
+        print("\n-- top 5 verified configs (lowest real latency) --")
+        for i, row in enumerate(top, 1):
+            print(f"  {i:>2}. {row['last_delay']:>5} ms  {row['name']}")
 
+    # -- connected devices (per-device traffic sampler) ---------------------
     try:
         devs = db.get_device_totals()
         if not devs:
@@ -245,15 +404,14 @@ def cmd_status(args):
         if devs:
             print("\n-- connected devices (syncbox) --")
             for d in devs:
-                ip = d.get('ip') or d.get('ip')
+                ip = d.get('ip')
                 last_seen = d.get('last_seen', '-')
                 rx = d.get('last_rx', d.get('download', 0))
                 tx = d.get('last_tx', d.get('upload', 0))
-                # try to show last-sample delta and timestamp if available
                 try:
-                    rows = db.get_recent_device_log(ip, limit=1)
-                    if rows:
-                        r = rows[0]
+                    rows2 = db.get_recent_device_log(ip, limit=1)
+                    if rows2:
+                        r = rows2[0]
                         rxd = int(r.get('rx_delta', 0) or 0)
                         txd = int(r.get('tx_delta', 0) or 0)
                         sample_ts = r.get('ts', '-')
@@ -263,7 +421,8 @@ def cmd_status(args):
                 except Exception:
                     rxd = txd = 0
                     sample_ts = '-'
-                print(f"  {ip}  last_seen={last_seen}  down={_human(rx)} (+{_human(rxd)})  up={_human(tx)} (+{_human(txd)})  last_sample={sample_ts}")
+                print(f"  {ip}  last_seen={last_seen}  down={_human_bytes(rx)} (+{_human_bytes(rxd)})"
+                      f"  up={_human_bytes(tx)} (+{_human_bytes(txd)})  last_sample={sample_ts}")
     except Exception:
         pass
 
