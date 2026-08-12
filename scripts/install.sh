@@ -146,9 +146,11 @@ else
 fi
 
 echo "== [7/8] Installing services..."
-cp "$SRC_DIR/systemd/totalray.service" /etc/systemd/system/totalray.service
+install -m 0644 "$SRC_DIR/systemd/totalray.service" /etc/systemd/system/totalray.service
 systemctl daemon-reload
-systemctl enable sing-box totalray >/dev/null 2>&1 || true
+systemctl enable sing-box
+systemctl enable totalray
+systemctl cat totalray >/dev/null
 
 echo "== [8/8] Downloading the Iran rule-sets..."
 totalray update-rules || true
