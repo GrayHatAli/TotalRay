@@ -343,6 +343,7 @@ def cmd_status(args):
     stats = db.stats()
     last_a = stats["last_test_a"]
     last_b = stats["last_test_b"]
+    round_status = _read_round_status(settings)
     sched = settings["schedule"]
 
     # -- overview --------------------------------------------------------
