@@ -71,8 +71,11 @@ def _build_tls(params: dict, default_sni: str = "", force: bool = False):
         if insecure:
             tls["insecure"] = True
         fp = _first(params, "fp")
-        if fp:
-            tls["utls"] = {"enabled": True, "fingerprint": fp}
+        if fp or security == "reality":
+            # sing-box requires uTLS for Reality clients. Subscription links
+            # often omit fp, so use the widely compatible Chrome fingerprint.
+            tls["utls"] = {"enabled": True,
+                            "fingerprint": fp or "chrome"}
         alpn = _first(params, "alpn")
         if alpn:
             tls["alpn"] = [a for a in alpn.split(",") if a]

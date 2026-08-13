@@ -94,19 +94,58 @@ class GroupTester:
         self.chunk_size = int(test.get("chunk_size", DEFAULT_CHUNK_SIZE))
         self.dns_server = settings["dns"]["local_server"]
 
-    def _run_chunk(self, items: list) -> dict:
+    def _check_items(self, items: list) -> tuple[bool, str]:
+        """Validate a group of outbounds with sing-box without starting it."""
         cfg = build_test_config(items, self.base_port, self.dns_server)
-        results = {item["id"]: -1 for item in items}
         fd, path = tempfile.mkstemp(prefix="totalray-test-", suffix=".json")
         try:
             with os.fdopen(fd, "w") as fh:
                 json.dump(cfg, fh)
             check = subprocess.run([self.bin, "check", "-c", path],
                                    capture_output=True, text=True, timeout=60)
-            if check.returncode != 0:
-                log.error("test config rejected by sing-box: %s",
-                          (check.stderr or check.stdout)[-500:])
+            return check.returncode == 0, (check.stderr or check.stdout)[-500:]
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def _find_valid_items(self, items: list) -> list:
+        """Keep valid outbounds when one item poisons a whole batch.
+
+        sing-box validates the complete configuration at once. Splitting a
+        rejected batch recursively lets us identify malformed entries while
+        retaining valid entries for connectivity testing.
+        """
+        if not items:
+            return []
+        valid, detail = self._check_items(items)
+        if valid:
+            return items
+        if len(items) == 1:
+            log.warning("skipping invalid config %s: %s",
+                        items[0]["id"], detail)
+            return []
+        midpoint = len(items) // 2
+        return (self._find_valid_items(items[:midpoint])
+                + self._find_valid_items(items[midpoint:]))
+
+    def _run_chunk(self, items: list) -> dict:
+        results = {item["id"]: -1 for item in items}
+        valid, detail = self._check_items(items)
+        if not valid:
+            log.error("test config rejected by sing-box: %s", detail)
+            items = self._find_valid_items(items)
+            if not items:
                 return results
+            log.info("continuing with %d valid configs from rejected batch",
+                     len(items))
+
+        cfg = build_test_config(items, self.base_port, self.dns_server)
+        fd, path = tempfile.mkstemp(prefix="totalray-test-", suffix=".json")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                json.dump(cfg, fh)
             proc = subprocess.Popen([self.bin, "run", "-c", path],
                                     stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL)
