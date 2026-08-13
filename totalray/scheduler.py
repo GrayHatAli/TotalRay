@@ -1,8 +1,12 @@
 """Daemon scheduler: subscription updates, dual-pool test rounds, rule-set updates for TotalRay."""
 from __future__ import annotations
 
+import json
 import logging
+import os
+import tempfile
 import threading
+import time
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -21,6 +25,32 @@ class Manager:
         self._job_lock = threading.Lock()
         self._internet_was_down = False
         self._live_monitor = None
+        self._round_status_path = os.path.join(
+            self.settings.data_dir, "round_status.json")
+
+    def _set_round_status(self, kind: str, running: bool) -> None:
+        """Publish daemon progress for the short-lived status command."""
+        state = {}
+        try:
+            with open(self._round_status_path, "r", encoding="utf-8") as fh:
+                state = json.load(fh)
+        except (OSError, ValueError):
+            pass
+        current = state.get(kind, {})
+        current["running"] = running
+        if running:
+            current["started_at"] = time.time()
+        else:
+            current["finished_at"] = time.time()
+        state[kind] = current
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                dir=os.path.dirname(self._round_status_path), prefix=".round-")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(state, fh)
+            os.replace(tmp_path, self._round_status_path)
+        except OSError as exc:
+            log.debug("could not write round status: %s", exc)
 
     def start_live_monitor(self) -> None:
         """Start the live connection monitor for real-time failover.
@@ -75,6 +105,7 @@ class Manager:
         if not self._job_lock.acquire(blocking=False):
             log.info("another job is already running; skipping subscription update")
             return
+        self._set_round_status("subscriptions", True)
         try:
             log.info("updating subscriptions...")
             summary = subfetch.update_all(self.settings, self.db)
@@ -82,30 +113,35 @@ class Manager:
         except Exception:  # noqa: BLE001
             log.exception("error updating subscriptions")
         finally:
+            self._set_round_status("subscriptions", False)
             self._job_lock.release()
 
     def job_test_pool_a(self):
         if not self._job_lock.acquire(blocking=False):
             log.info("another job is already running; skipping pool-A test round")
             return
+        self._set_round_status("pool_a", True)
         try:
             log.info("starting pool-A (candidate) test round...")
             self.run_pool_a_round()
         except Exception:  # noqa: BLE001
             log.exception("error during pool-A test round")
         finally:
+            self._set_round_status("pool_a", False)
             self._job_lock.release()
 
     def job_test_pool_b(self):
         if not self._job_lock.acquire(blocking=False):
             log.info("another job is already running; skipping pool-B test round")
             return
+        self._set_round_status("pool_b", True)
         try:
             log.info("starting pool-B (verified) test round...")
             self.run_pool_b_round()
         except Exception:  # noqa: BLE001
             log.exception("error during pool-B test round")
         finally:
+            self._set_round_status("pool_b", False)
             self._job_lock.release()
 
     def job_update_rules(self):
@@ -189,10 +225,11 @@ class Manager:
 
 def run_daemon(settings, db):
     manager = Manager(settings, db)
-    manager.bootstrap()
 
-    # Start live connection monitor for real-time failover on packet drops
+    # Start monitoring before bootstrap: bootstrap includes a potentially long
+    # Pool-A test and must not leave a stale heartbeat during that work.
     manager.start_live_monitor()
+    manager.bootstrap()
 
     sch = settings["schedule"]
     scheduler = BackgroundScheduler()

@@ -16,14 +16,15 @@ from . import __version__
 TEHRAN_TZ = ZoneInfo("Asia/Tehran")
 
 
-def _setup_logging(settings) -> None:
+def _setup_logging(settings, console_output: bool = True) -> None:
     os.makedirs(settings.data_dir, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     root = logging.getLogger()
     root.setLevel(logging.INFO)
-    console = logging.StreamHandler()
-    console.setFormatter(fmt)
-    root.addHandler(console)
+    if console_output:
+        console = logging.StreamHandler()
+        console.setFormatter(fmt)
+        root.addHandler(console)
     try:
         fileh = logging.handlers.RotatingFileHandler(
             os.path.join(settings.data_dir, "totalray.log"),
@@ -217,6 +218,25 @@ def _read_live_monitor_status(settings) -> dict | None:
         return None
 
 
+def _read_round_status(settings) -> dict:
+    path = os.path.join(settings.data_dir, "round_status.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _round_display(status: dict, kind: str, fallback_last: str,
+                   fallback_next: str) -> tuple[str, str]:
+    current = status.get(kind) or {}
+    if current.get("running"):
+        started = current.get("started_at")
+        elapsed = _fmt_ago(started) if started else "now"
+        return f"running ({elapsed})", "in progress"
+    return fallback_last, fallback_next
+
+
 def _get_traffic_totals(settings):
     """Cumulative download/upload since sing-box started, from the Clash
     API's /connections endpoint (downloadTotal/uploadTotal fields)."""
@@ -383,8 +403,11 @@ def cmd_status(args):
     print(_title_bar("Pool A"))
     pool_a_minutes = int(sched.get("pool_a_test_minutes", 15))
     if last_a:
+        last_display, next_display = _round_display(
+            round_status, "pool_a", _fmt_hhmm(last_a["ts"]),
+            _next_round(last_a["ts"], pool_a_minutes))
         rows_a = [[last_a["total"], last_a["ok"], last_a["removed"],
-                   _fmt_hhmm(last_a["ts"]), _next_round(last_a["ts"], pool_a_minutes)]]
+                   last_display, next_display]]
         print(_fmt_table(["Total", "Promoted", "Removed", "Last Round", "Next Round"], rows_a))
     else:
         print("  (no pool-A test rounds yet)")
@@ -399,8 +422,11 @@ def cmd_status(args):
     print(_title_bar("Pool B"))
     pool_b_minutes = int(sched.get("pool_b_test_minutes", 3))
     if last_b:
+        last_display, next_display = _round_display(
+            round_status, "pool_b", _fmt_hhmm(last_b["ts"]),
+            _next_round(last_b["ts"], pool_b_minutes))
         rows_b = [[last_b["total"], last_b["ok"], last_b["failed"],
-                   _fmt_hhmm(last_b["ts"]), _next_round(last_b["ts"], pool_b_minutes)]]
+                   last_display, next_display]]
         print(_fmt_table(["Total", "Healthy", "Demoted", "Last Round", "Next Round"], rows_b))
     else:
         print("  (no pool-B test rounds yet)")
@@ -555,7 +581,8 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     settings, _ = _load_minimal(args)
-    _setup_logging(settings)
+    # Keep status output clean; diagnostics remain in rotating logs.
+    _setup_logging(settings, console_output=args.command != "status")
     args.fn(args)
 
 
