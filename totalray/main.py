@@ -8,9 +8,12 @@ import os
 import sys
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from . import __version__
+
+TEHRAN_TZ = ZoneInfo("Asia/Tehran")
 
 
 def _setup_logging(settings) -> None:
@@ -163,11 +166,12 @@ def _fmt_table(headers, rows) -> str:
 
 
 def _parse_db_ts(ts_str):
-    """Parse a SQLite datetime('now') string ('YYYY-MM-DD HH:MM:SS', UTC)."""
+    """Parse SQLite's UTC datetime('now') string and convert to Tehran."""
     if not ts_str:
         return None
     try:
-        return datetime.strptime(str(ts_str)[:19], "%Y-%m-%d %H:%M:%S")
+        dt = datetime.strptime(str(ts_str)[:19], "%Y-%m-%d %H:%M:%S")
+        return dt.replace(tzinfo=timezone.utc).astimezone(TEHRAN_TZ)
     except (ValueError, TypeError):
         return None
 
@@ -175,6 +179,11 @@ def _parse_db_ts(ts_str):
 def _fmt_hhmm(ts_str) -> str:
     dt = _parse_db_ts(ts_str)
     return dt.strftime("%H:%M") if dt else "-"
+
+
+def _fmt_datetime(ts_str) -> str:
+    dt = _parse_db_ts(ts_str)
+    return dt.strftime("%Y-%m-%d %H:%M") if dt else "-"
 
 
 def _next_round(ts_str, minutes: int) -> str:
@@ -411,7 +420,7 @@ def cmd_status(args):
             print("\n-- connected devices (syncbox) --")
             for d in devs:
                 ip = d.get('ip')
-                last_seen = d.get('last_seen', '-')
+                last_seen = _fmt_datetime(d.get('last_seen'))
                 rx = d.get('last_rx', d.get('download', 0))
                 tx = d.get('last_tx', d.get('upload', 0))
                 try:
@@ -420,7 +429,7 @@ def cmd_status(args):
                         r = rows2[0]
                         rxd = int(r.get('rx_delta', 0) or 0)
                         txd = int(r.get('tx_delta', 0) or 0)
-                        sample_ts = r.get('ts', '-')
+                        sample_ts = _fmt_datetime(r.get('ts'))
                     else:
                         rxd = txd = 0
                         sample_ts = '-'

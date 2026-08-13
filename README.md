@@ -300,6 +300,24 @@ totalray status          real connectivity status + pool overview + top/worst co
 totalray failed-requests show recent failed HTTP requests
 ```
 
+## Updating an installed instance
+
+The installer places an update command at `/usr/local/sbin/totalray-update`.
+All date/time values shown by `totalray status` use the `Asia/Tehran`
+timezone.
+It downloads the latest `main` branch, updates the application and Python
+dependencies, reloads systemd, and restarts `totalray.service`.
+
+```bash
+sudo totalray-update
+sudo totalray status
+```
+
+The update does **not** replace `/etc/totalray/config.yaml`, `/var/lib/totalray`,
+or `/etc/sing-box`; subscriptions, scores, databases, rule-sets, and generated
+sing-box state are preserved. It updates `/opt/totalray` because the service's
+Python environment and application code live there.
+
 ## Services & logs
 
 ```bash

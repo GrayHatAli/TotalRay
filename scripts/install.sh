@@ -94,6 +94,7 @@ cat > /usr/local/bin/totalray <<'WRAPEOF'
 cd /opt/totalray && exec /opt/totalray/venv/bin/python -m totalray --config /etc/totalray/config.yaml "$@"
 WRAPEOF
 chmod +x /usr/local/bin/totalray
+install -m 0755 "$SRC_DIR/scripts/update.sh" /usr/local/sbin/totalray-update
 
 [ -f /etc/totalray/config.yaml ] || cp "$SRC_DIR/config.yaml" /etc/totalray/config.yaml
 
@@ -172,6 +173,7 @@ Next steps:
   2) Or with:   sudo totalray add-sub "https://..."
   3) Start the service:   sudo systemctl start totalray
   4) Check status:        sudo totalray status
+  5) Future updates:       sudo totalray-update
 
 DONE
 
