@@ -48,6 +48,7 @@ class Manager:
                 dir=os.path.dirname(self._round_status_path), prefix=".round-")
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(state, fh)
+            os.chmod(tmp_path, 0o664)
             os.replace(tmp_path, self._round_status_path)
         except OSError as exc:
             log.debug("could not write round status: %s", exc)

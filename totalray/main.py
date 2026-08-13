@@ -383,6 +383,8 @@ def cmd_status(args):
         else:
             last_round = _fmt_hhmm(sub.get("last_update"))
         next_round = _next_round(sub.get("last_update"), sub_minutes) if sub.get("enabled", 1) else "-"
+        last_round, next_round = _round_display(
+            round_status, "subscriptions", last_round, next_round)
         sub_rows.append([i, _truncate(sub["url"], 38), count, healthy, last_round, next_round])
     if sub_rows:
         print(_fmt_table(["No", "Url", "Configs", "Healthy", "Last Round", "Next Round"], sub_rows))
