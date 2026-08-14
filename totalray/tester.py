@@ -175,14 +175,23 @@ class GroupTester:
                 pass
         return results
 
-    def test_all(self, items: list) -> dict:
+    def test_all(self, items: list, on_chunk=None) -> dict:
+        """Test items chunk by chunk and optionally publish each result.
+
+        ``on_chunk`` receives ``(chunk_items, chunk_results)`` immediately
+        after each chunk finishes. This lets callers persist successful
+        configs without waiting for a very large pool to finish.
+        """
         results = {}
         total = len(items)
         for offset in range(0, total, self.chunk_size):
             chunk = items[offset:offset + self.chunk_size]
             log.info("testing batch %d-%d of %d configs...",
                      offset + 1, offset + len(chunk), total)
-            results.update(self._run_chunk(chunk))
+            chunk_results = self._run_chunk(chunk)
+            results.update(chunk_results)
+            if on_chunk is not None:
+                on_chunk(chunk, chunk_results)
             ok = sum(1 for v in results.values() if v > 0)
             log.info("progress: %d/%d reachable", ok, len(results))
         return results

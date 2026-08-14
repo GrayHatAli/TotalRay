@@ -132,9 +132,8 @@ class Manager:
             self._job_lock.release()
 
     def job_test_pool_b(self):
-        if not self._job_lock.acquire(blocking=False):
-            log.info("another job is already running; skipping pool-B test round")
-            return
+        # Pool B is deliberately independent from Pool A. It must continue
+        # checking the live verified set while Pool A scans new candidates.
         self._set_round_status("pool_b", True)
         try:
             log.info("starting pool-B (verified) test round...")
@@ -143,7 +142,6 @@ class Manager:
             log.exception("error during pool-B test round")
         finally:
             self._set_round_status("pool_b", False)
-            self._job_lock.release()
 
     def job_update_rules(self):
         if not self._job_lock.acquire(blocking=False):
@@ -182,18 +180,30 @@ class Manager:
             log.warning("no configs in pool A to test")
             return {"total": 0}
         tester = GroupTester(self.settings)
-        results = tester.test_all(candidates)
         ping_threshold = int(self.settings["test"]["ping_threshold_ms"])
         fail_threshold = int(self.settings["test"]["fail_threshold"])
-        stats = self.db.record_pool_a_results(results, ping_threshold, fail_threshold)
+        aggregate = {"total": 0, "ok": 0, "failed": 0, "removed": []}
+
+        def persist_chunk(_items, chunk_results):
+            chunk_stats = self.db.record_pool_a_results(
+                chunk_results, ping_threshold, fail_threshold)
+            aggregate["total"] += chunk_stats["total"]
+            aggregate["ok"] += chunk_stats["ok"]
+            aggregate["failed"] += chunk_stats["failed"]
+            aggregate["removed"].extend(chunk_stats["removed"])
+            # Apply promotions immediately so the verified group can use a
+            # healthy config from this chunk while later chunks are tested.
+            with self._apply_lock:
+                ok, msg = builder.rebuild_and_apply(self.settings, self.db)
+            log.info("chunk config applied: %s - %s", ok, msg)
+
+        tester.test_all(candidates, on_chunk=persist_chunk)
         log.info("pool-A round done: %d tested | %d promoted to pool B |"
                  " %d still in pool A | %d removed (threshold %d, ping<=%dms)",
-                 stats["total"], stats["ok"],
-                 stats["failed"] - len(stats["removed"]),
-                 len(stats["removed"]), fail_threshold, ping_threshold)
-        ok, msg = builder.rebuild_and_apply(self.settings, self.db)
-        log.info("config applied: %s - %s", ok, msg)
-        return stats
+                 aggregate["total"], aggregate["ok"],
+                 aggregate["failed"] - len(aggregate["removed"]),
+                 len(aggregate["removed"]), fail_threshold, ping_threshold)
+        return aggregate
 
     def run_pool_b_round(self) -> dict:
         if not self._internet_ok():
@@ -213,7 +223,8 @@ class Manager:
                  stats["total"], stats["ok"],
                  stats["failed"] - len(stats["removed"]),
                  len(stats["removed"]), fail_threshold, ping_threshold)
-        ok, msg = builder.rebuild_and_apply(self.settings, self.db)
+        with self._apply_lock:
+            ok, msg = builder.rebuild_and_apply(self.settings, self.db)
         log.info("config applied: %s - %s", ok, msg)
         return stats
 
