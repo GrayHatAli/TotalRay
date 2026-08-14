@@ -289,9 +289,14 @@ def _live_connection_status(settings, db) -> str:
     if clash.get("secret"):
         headers["Authorization"] = f"Bearer {clash['secret']}"
 
+    # Status is a bounded snapshot, not a retried data-fetch operation. A
+    # dead upstream must not make `totalray status` hang for minutes.
+    status_session = requests.Session()
+    status_session.trust_env = False
     try:
-        resp = client.get(f"http://{host}:{port}/proxies/auto",
-                          headers=headers, timeout=5)
+        resp = status_session.get(
+            f"http://{host}:{port}/proxies/auto",
+            headers=headers, timeout=(2, 3))
         resp.raise_for_status()
         now = resp.json().get("now", "")
     except Exception as exc:  # noqa: BLE001
@@ -317,7 +322,8 @@ def _live_connection_status(settings, db) -> str:
             server = None
 
     try:
-        exit_ip = client.get("https://api.ipify.org", timeout=8).text.strip()
+        exit_ip = status_session.get(
+            "https://api.ipify.org", timeout=(3, 5)).text.strip()
     except Exception as exc:  # noqa: BLE001
         return (f"status        : disconnected (selected {name}; exit IP check"
                 f" failed: {type(exc).__name__} - DNS/proxy may be unavailable)")
@@ -599,3 +605,4 @@ def _load_minimal(args):
 
 if __name__ == "__main__":
     main()
+   main()
