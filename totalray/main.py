@@ -319,8 +319,8 @@ def _live_connection_status(settings, db) -> str:
     try:
         exit_ip = client.get("https://api.ipify.org", timeout=8).text.strip()
     except Exception as exc:  # noqa: BLE001
-        return (f"status        : disconnected (selected {name}, but no exit IP"
-                f" response: {exc})")
+        return (f"status        : disconnected (selected {name}; exit IP check"
+                f" failed: {type(exc).__name__} - DNS/proxy may be unavailable)")
 
     server_ip = server
     if server and not server.replace(".", "").isdigit():
