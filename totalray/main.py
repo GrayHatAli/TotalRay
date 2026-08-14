@@ -605,4 +605,3 @@ def _load_minimal(args):
 
 if __name__ == "__main__":
     main()
-   main()
