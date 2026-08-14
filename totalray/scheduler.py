@@ -23,10 +23,14 @@ class Manager:
         self.settings = settings
         self.db = db
         self._job_lock = threading.Lock()
+        # Pool A and Pool B may test concurrently, but sing-box config writes
+        # and restarts must remain serialized to avoid route/config races.
+        self._apply_lock = threading.Lock()
         self._internet_was_down = False
         self._live_monitor = None
         self._round_status_path = os.path.join(
             self.settings.data_dir, "round_status.json")
+        self._reset_round_status()
 
     def _set_round_status(self, kind: str, running: bool) -> None:
         """Publish daemon progress for the short-lived status command."""
@@ -266,6 +270,10 @@ def run_daemon(settings, db):
              " pool-B test every %d min | rule-sets every %d h",
              int(sch["sub_update_minutes"]), int(sch["pool_a_test_minutes"]),
              int(sch["pool_b_test_minutes"]), int(sch["rules_update_hours"]))
+
+    # Start scheduled jobs before bootstrap so Pool B can run on schedule
+    # while the initial Pool A scan is still processing.
+    manager.bootstrap()
 
     stop = threading.Event()
     try:
