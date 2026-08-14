@@ -10,6 +10,7 @@ import json
 import time
 
 import requests
+import subprocess
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -280,7 +281,6 @@ def _live_connection_status(settings, db) -> str:
     selected in sing-box's routing table while itself being dead, and
     ipify alone can't tell you *which* server you're behind.
     """
-    import socket
     from .http_client import client_for
 
     client = client_for(settings)
@@ -324,8 +324,10 @@ def _live_connection_status(settings, db) -> str:
             server = None
 
     try:
-        exit_ip = status_session.get(
-            "https://api.ipify.org", timeout=(3, 5)).text.strip()
+        probe = subprocess.run(
+            ["curl", "-4", "-fsS", "--max-time", "5", "https://api.ipify.org"],
+            capture_output=True, text=True, timeout=7, check=True)
+        exit_ip = probe.stdout.strip()
     except Exception as exc:  # noqa: BLE001
         return (f"status        : disconnected (selected {name}; exit IP check"
                 f" failed: {type(exc).__name__} - DNS/proxy may be unavailable)")
@@ -333,8 +335,11 @@ def _live_connection_status(settings, db) -> str:
     server_ip = server
     if server and not server.replace(".", "").isdigit():
         try:
-            server_ip = socket.gethostbyname(server)
-        except OSError:
+            resolved = subprocess.run(
+                ["getent", "ahostsv4", server],
+                capture_output=True, text=True, timeout=3, check=True)
+            server_ip = resolved.stdout.split()[0] if resolved.stdout else None
+        except (OSError, subprocess.SubprocessError):
             server_ip = None
 
     if server_ip and exit_ip == server_ip:
