@@ -32,6 +32,27 @@ class Manager:
             self.settings.data_dir, "round_status.json")
         self._reset_round_status()
 
+    def _reset_round_status(self) -> None:
+        """Clear stale in-progress flags left by a previous daemon process."""
+        try:
+            with open(self._round_status_path, "r", encoding="utf-8") as fh:
+                state = json.load(fh)
+        except (OSError, ValueError):
+            state = {}
+        for value in state.values():
+            if isinstance(value, dict):
+                value["running"] = False
+        try:
+            os.makedirs(os.path.dirname(self._round_status_path), exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(
+                dir=os.path.dirname(self._round_status_path), prefix=".round-")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(state, fh)
+            os.chmod(tmp_path, 0o664)
+            os.replace(tmp_path, self._round_status_path)
+        except OSError as exc:
+            log.debug("could not reset round status: %s", exc)
+
     def _set_round_status(self, kind: str, running: bool) -> None:
         """Publish daemon progress for the short-lived status command."""
         state = {}
