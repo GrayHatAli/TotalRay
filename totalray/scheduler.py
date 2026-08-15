@@ -266,7 +266,6 @@ def run_daemon(settings, db):
     # Start monitoring before bootstrap: bootstrap includes a potentially long
     # Pool-A test and must not leave a stale heartbeat during that work.
     manager.start_live_monitor()
-    manager.bootstrap()
 
     sch = settings["schedule"]
     scheduler = BackgroundScheduler()
