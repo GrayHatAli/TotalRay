@@ -230,13 +230,49 @@ def _read_round_status(settings) -> dict:
         return {}
 
 
+def _round_wait_reason(current: dict) -> str:
+    """Render the human reason for a queued/skipped round, e.g.
+    'internet down (blocked by internet)' or just 'busy'."""
+    parts = []
+    reason = current.get("reason")
+    if reason:
+        parts.append(str(reason).replace("_", " "))
+    blocked = current.get("blocked_by")
+    if blocked:
+        parts.append(f"blocked by {blocked}")
+    return f" ({'; '.join(parts)})" if parts else ""
+
+
 def _round_display(status: dict, kind: str, fallback_last: str,
                    fallback_next: str) -> tuple[str, str]:
+    """Render live round state for one job kind.
+
+    Prefers the concurrency-safe state written by the daemon's
+    RoundStateStore; falls back to the last test_log timestamps when a
+    job is idle or no state file exists yet. Distinct states per the
+    architecture plan: running, queued, skipped, failed.
+    """
     current = status.get(kind) or {}
-    if current.get("running"):
+    state = current.get("state")
+    if state == "running" or current.get("running"):
         started = current.get("started_at")
         elapsed = _fmt_ago(started) if started else "now"
-        return f"running ({elapsed})", "in progress"
+        text = f"running ({elapsed})"
+        processed = current.get("items_processed")
+        total = current.get("items_total")
+        if processed is not None and total:
+            text += f" {processed:,}/{total:,}"
+        if current.get("round_id"):
+            text += f" round={current['round_id']}"
+        return text, "in progress"
+    if state == "queued":
+        return f"queued{_round_wait_reason(current)}", "pending"
+    if state == "skipped":
+        return f"skipped{_round_wait_reason(current)}", "-"
+    if state == "failed":
+        err = current.get("last_error")
+        suffix = f": {_truncate(err, 40)}" if err else ""
+        return f"failed{suffix}", "-"
     return fallback_last, fallback_next
 
 
@@ -418,11 +454,16 @@ def cmd_status(args):
     print()
     print(_title_bar("Pool A"))
     pool_a_minutes = int(sched.get("pool_a_test_minutes", 15))
-    if last_a:
+    # Show live round state even when the database has no finished round yet
+    # (e.g. the first-ever round is still running).
+    if last_a or (round_status.get("pool_a") or {}).get("state"):
+        last_a_ts = last_a["ts"] if last_a else None
         last_display, next_display = _round_display(
-            round_status, "pool_a", _fmt_hhmm(last_a["ts"]),
-            _next_round(last_a["ts"], pool_a_minutes))
-        rows_a = [[last_a["total"], last_a["ok"], last_a["removed"],
+            round_status, "pool_a", _fmt_hhmm(last_a_ts),
+            _next_round(last_a_ts, pool_a_minutes))
+        rows_a = [[last_a["total"] if last_a else "-",
+                   last_a["ok"] if last_a else "-",
+                   last_a["removed"] if last_a else "-",
                    last_display, next_display]]
         print(_fmt_table(["Total", "Promoted", "Removed", "Last Round", "Next Round"], rows_a))
     else:
@@ -437,11 +478,14 @@ def cmd_status(args):
     print()
     print(_title_bar("Pool B"))
     pool_b_minutes = int(sched.get("pool_b_test_minutes", 3))
-    if last_b:
+    if last_b or (round_status.get("pool_b") or {}).get("state"):
+        last_b_ts = last_b["ts"] if last_b else None
         last_display, next_display = _round_display(
-            round_status, "pool_b", _fmt_hhmm(last_b["ts"]),
-            _next_round(last_b["ts"], pool_b_minutes))
-        rows_b = [[last_b["total"], last_b["ok"], last_b["failed"],
+            round_status, "pool_b", _fmt_hhmm(last_b_ts),
+            _next_round(last_b_ts, pool_b_minutes))
+        rows_b = [[last_b["total"] if last_b else "-",
+                   last_b["ok"] if last_b else "-",
+                   last_b["failed"] if last_b else "-",
                    last_display, next_display]]
         print(_fmt_table(["Total", "Healthy", "Demoted", "Last Round", "Next Round"], rows_b))
     else:

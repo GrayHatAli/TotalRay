@@ -1,12 +1,10 @@
 """Daemon scheduler: subscription updates, dual-pool test rounds, rule-set updates for TotalRay."""
 from __future__ import annotations
 
-import json
 import logging
 import os
-import tempfile
 import threading
-import time
+import uuid
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -14,6 +12,7 @@ from . import builder, net, rulesets, subfetch
 from .tester import GroupTester
 from . import traffic
 from .live_monitor import create_monitor
+from .round_state import RoundStateStore
 
 log = logging.getLogger(__name__)
 
@@ -30,53 +29,8 @@ class Manager:
         self._live_monitor = None
         self._round_status_path = os.path.join(
             self.settings.data_dir, "round_status.json")
-        self._reset_round_status()
-
-    def _reset_round_status(self) -> None:
-        """Clear stale in-progress flags left by a previous daemon process."""
-        try:
-            with open(self._round_status_path, "r", encoding="utf-8") as fh:
-                state = json.load(fh)
-        except (OSError, ValueError):
-            state = {}
-        for value in state.values():
-            if isinstance(value, dict):
-                value["running"] = False
-        try:
-            os.makedirs(os.path.dirname(self._round_status_path), exist_ok=True)
-            fd, tmp_path = tempfile.mkstemp(
-                dir=os.path.dirname(self._round_status_path), prefix=".round-")
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(state, fh)
-            os.chmod(tmp_path, 0o664)
-            os.replace(tmp_path, self._round_status_path)
-        except OSError as exc:
-            log.debug("could not reset round status: %s", exc)
-
-    def _set_round_status(self, kind: str, running: bool) -> None:
-        """Publish daemon progress for the short-lived status command."""
-        state = {}
-        try:
-            with open(self._round_status_path, "r", encoding="utf-8") as fh:
-                state = json.load(fh)
-        except (OSError, ValueError):
-            pass
-        current = state.get(kind, {})
-        current["running"] = running
-        if running:
-            current["started_at"] = time.time()
-        else:
-            current["finished_at"] = time.time()
-        state[kind] = current
-        try:
-            fd, tmp_path = tempfile.mkstemp(
-                dir=os.path.dirname(self._round_status_path), prefix=".round-")
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(state, fh)
-            os.chmod(tmp_path, 0o664)
-            os.replace(tmp_path, self._round_status_path)
-        except OSError as exc:
-            log.debug("could not write round status: %s", exc)
+        self._round_state = RoundStateStore(self._round_status_path)
+        self._round_state.recover()
 
     def start_live_monitor(self) -> None:
         """Start the live connection monitor for real-time failover.
@@ -129,55 +83,65 @@ class Manager:
     # ---------------------------------------------------- jobs
     def job_update_subs(self):
         if not self._job_lock.acquire(blocking=False):
+            self._round_state.skip("subscriptions", reason="busy", blocked_by="job_lock")
             log.info("another job is already running; skipping subscription update")
             return
-        self._set_round_status("subscriptions", True)
+        round_id = uuid.uuid4().hex[:8]
+        self._round_state.start("subscriptions", round_id=round_id)
         try:
             log.info("updating subscriptions...")
             summary = subfetch.update_all(self.settings, self.db)
             log.info("subscriptions: %s", summary)
-        except Exception:  # noqa: BLE001
+            self._round_state.finish("subscriptions", success=True)
+        except Exception as exc:  # noqa: BLE001
             log.exception("error updating subscriptions")
+            self._round_state.finish("subscriptions", success=False, error=str(exc)[:400])
         finally:
-            self._set_round_status("subscriptions", False)
             self._job_lock.release()
 
     def job_test_pool_a(self):
         if not self._job_lock.acquire(blocking=False):
+            self._round_state.skip("pool_a", reason="busy", blocked_by="job_lock")
             log.info("another job is already running; skipping pool-A test round")
             return
-        self._set_round_status("pool_a", True)
         try:
             log.info("starting pool-A (candidate) test round...")
             self.run_pool_a_round()
         except Exception:  # noqa: BLE001
             log.exception("error during pool-A test round")
         finally:
-            self._set_round_status("pool_a", False)
             self._job_lock.release()
 
     def job_test_pool_b(self):
         # Pool B is deliberately independent from Pool A. It must continue
         # checking the live verified set while Pool A scans new candidates.
-        self._set_round_status("pool_b", True)
+        # Guard against concurrent Pool B rounds stacking up.
+        current = self._round_state.snapshot().get("pool_b") or {}
+        if current.get("state") == "running":
+            self._round_state.skip("pool_b", reason="already_running", blocked_by="pool_b")
+            log.info("pool-B round already in progress; skipping duplicate schedule")
+            return
         try:
             log.info("starting pool-B (verified) test round...")
             self.run_pool_b_round()
         except Exception:  # noqa: BLE001
             log.exception("error during pool-B test round")
-        finally:
-            self._set_round_status("pool_b", False)
 
     def job_update_rules(self):
         if not self._job_lock.acquire(blocking=False):
+            self._round_state.skip("rules", reason="busy", blocked_by="job_lock")
             return
+        round_id = uuid.uuid4().hex[:8]
+        self._round_state.start("rules", round_id=round_id)
         try:
             log.info("updating rule-sets...")
             rulesets.update_rulesets(self.settings)
             ok, msg = builder.rebuild_and_apply(self.settings, self.db, force=True)
             log.info("config applied after rule-set update: %s %s", ok, msg)
-        except Exception:  # noqa: BLE001
+            self._round_state.finish("rules", success=ok, error=None if ok else msg[:400])
+        except Exception as exc:  # noqa: BLE001
             log.exception("error updating rule-sets")
+            self._round_state.finish("rules", success=False, error=str(exc)[:400])
         finally:
             self._job_lock.release()
 
@@ -197,17 +161,25 @@ class Manager:
             self._job_lock.release()
 
     # ---------------------------------------------------- core logic
-    def run_pool_a_round(self) -> dict:
+    def run_pool_a_round(self, round_id: str | None = None) -> dict:
         if not self._internet_ok():
+            self._round_state.skip("pool_a", reason="internet_down", blocked_by="internet")
             return {"total": 0, "skipped": "internet_down"}
         candidates = self.db.get_pool_candidates("a")
         if not candidates:
             log.warning("no configs in pool A to test")
+            rid = round_id or uuid.uuid4().hex[:8]
+            self._round_state.start("pool_a", round_id=rid, total=0)
+            self._round_state.finish("pool_a", success=True)
             return {"total": 0}
+        rid = round_id or uuid.uuid4().hex[:8]
+        existing = (self._round_state.snapshot().get("pool_a") or {}).get("state")
+        if existing != "running":
+            self._round_state.start("pool_a", round_id=rid, total=len(candidates))
         tester = GroupTester(self.settings)
         ping_threshold = int(self.settings["test"]["ping_threshold_ms"])
         fail_threshold = int(self.settings["test"]["fail_threshold"])
-        aggregate = {"total": 0, "ok": 0, "failed": 0, "removed": []}
+        aggregate: dict = {"total": 0, "ok": 0, "failed": 0, "removed": []}
 
         def persist_chunk(_items, chunk_results):
             chunk_stats = self.db.record_pool_a_results(
@@ -216,41 +188,74 @@ class Manager:
             aggregate["ok"] += chunk_stats["ok"]
             aggregate["failed"] += chunk_stats["failed"]
             aggregate["removed"].extend(chunk_stats["removed"])
-            # Apply promotions immediately so the verified group can use a
-            # healthy config from this chunk while later chunks are tested.
+            self._round_state.progress(
+                "pool_a", processed=aggregate["total"],
+                ok=aggregate["ok"], failed=aggregate["failed"],
+                stale=chunk_stats.get("stale", 0))
             with self._apply_lock:
                 ok, msg = builder.rebuild_and_apply(self.settings, self.db)
             log.info("chunk config applied: %s - %s", ok, msg)
 
-        tester.test_all(candidates, on_chunk=persist_chunk)
+        try:
+            tester.test_all(candidates, on_chunk=persist_chunk)
+        except Exception as exc:
+            self._round_state.finish("pool_a", success=False, error=str(exc)[:400])
+            raise
         log.info("pool-A round done: %d tested | %d promoted to pool B |"
                  " %d still in pool A | %d removed (threshold %d, ping<=%dms)",
                  aggregate["total"], aggregate["ok"],
                  aggregate["failed"] - len(aggregate["removed"]),
                  len(aggregate["removed"]), fail_threshold, ping_threshold)
+        self._round_state.finish(
+            "pool_a", success=True,
+            items_total=aggregate["total"],
+            items_processed=aggregate["total"],
+            items_ok=aggregate["ok"],
+            items_failed=aggregate["failed"])
         return aggregate
 
-    def run_pool_b_round(self) -> dict:
+    def run_pool_b_round(self, round_id: str | None = None) -> dict:
         if not self._internet_ok():
+            self._round_state.skip("pool_b", reason="internet_down", blocked_by="internet")
             return {"total": 0, "skipped": "internet_down"}
         candidates = self.db.get_pool_candidates("b")
         if not candidates:
             log.warning("no configs in pool B to test yet"
                         " (nothing has been promoted from pool A)")
+            rid = round_id or uuid.uuid4().hex[:8]
+            self._round_state.start("pool_b", round_id=rid, total=0)
+            self._round_state.finish("pool_b", success=True)
             return {"total": 0}
+        rid = round_id or uuid.uuid4().hex[:8]
+        existing = (self._round_state.snapshot().get("pool_b") or {}).get("state")
+        if existing != "running":
+            self._round_state.start("pool_b", round_id=rid, total=len(candidates))
         tester = GroupTester(self.settings)
         results = tester.test_all(candidates)
         ping_threshold = int(self.settings["test"]["ping_threshold_ms"])
         fail_threshold = int(self.settings["test"]["fail_threshold"])
-        stats = self.db.record_pool_b_results(results, ping_threshold, fail_threshold)
+        try:
+            stats = self.db.record_pool_b_results(results, ping_threshold, fail_threshold)
+        except Exception as exc:
+            self._round_state.finish("pool_b", success=False, error=str(exc)[:400])
+            raise
         log.info("pool-B round done: %d tested | %d still healthy |"
                  " %d demoted to pool A | %d removed (threshold %d, ping<=%dms)",
                  stats["total"], stats["ok"],
                  stats["failed"] - len(stats["removed"]),
                  len(stats["removed"]), fail_threshold, ping_threshold)
+        self._round_state.progress(
+            "pool_b", processed=stats["total"],
+            ok=stats["ok"], failed=stats["failed"], stale=stats.get("stale", 0))
         with self._apply_lock:
             ok, msg = builder.rebuild_and_apply(self.settings, self.db)
         log.info("config applied: %s - %s", ok, msg)
+        self._round_state.finish(
+            "pool_b", success=True,
+            items_total=stats["total"],
+            items_processed=stats["total"],
+            items_ok=stats["ok"],
+            items_failed=stats["failed"])
         return stats
 
     def bootstrap(self):
