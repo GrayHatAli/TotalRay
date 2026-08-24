@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import threading
+import uuid
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -61,6 +62,26 @@ CREATE TABLE IF NOT EXISTS device_traffic_log (
     tx_total INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_device_traffic_ip_ts ON device_traffic_log(ip, ts);
+
+-- Monotonic membership versions and immutable test-round metadata.
+CREATE TABLE IF NOT EXISTS state_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS test_rounds (
+    id                  TEXT PRIMARY KEY,
+    pool                TEXT NOT NULL,
+    snapshot_generation INTEGER NOT NULL,
+    started_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at         TEXT,
+    state               TEXT NOT NULL,
+    total               INTEGER NOT NULL DEFAULT 0,
+    ok                  INTEGER NOT NULL DEFAULT 0,
+    failed              INTEGER NOT NULL DEFAULT 0,
+    stale               INTEGER NOT NULL DEFAULT 0,
+    error               TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_test_rounds_pool_started ON test_rounds(pool, started_at);
 """
 
 
@@ -76,9 +97,86 @@ class Database:
             self._migrate()
 
     def _migrate(self) -> None:
-        # future migrations can be placed here; ensure indexes exist
+        """Apply additive migrations that are safe for an existing Pi database."""
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_configs_pool ON configs(removed, pool)")
+        # Older databases get the new tables through SCHEMA; initialize their
+        # counters without changing existing configs or subscriptions.
+        for key in ("db_generation", "pool_a_generation", "pool_b_generation"):
+            self._conn.execute(
+                "INSERT OR IGNORE INTO state_meta(key, value) VALUES (?, '0')",
+                (key,))
+        # test_rounds was introduced before the stale counter in development.
+        columns = {row["name"] for row in self._conn.execute(
+            "PRAGMA table_info(test_rounds)")}
+        if "stale" not in columns:
+            self._conn.execute(
+                "ALTER TABLE test_rounds ADD COLUMN stale INTEGER NOT NULL DEFAULT 0")
+
+    def _generation(self, key: str) -> int:
+        row = self._conn.execute(
+            "SELECT value FROM state_meta WHERE key=?", (key,)).fetchone()
+        return int(row["value"]) if row else 0
+
+    def _bump_generations(self, *pools: str) -> None:
+        """Advance the global and affected pool membership generations."""
+        keys = {"db_generation"}
+        keys.update(f"pool_{pool}_generation" for pool in pools)
+        for key in keys:
+            self._conn.execute(
+                "UPDATE state_meta SET value=CAST(value AS INTEGER)+1 WHERE key=?",
+                (key,))
+
+    def pool_generation(self, pool: str) -> int:
+        with self._lock:
+            return self._generation(f"pool_{pool}_generation")
+
+    def get_pool_snapshot(self, pool: str, max_n: int = 0) -> dict:
+        """Capture a pool's membership generation and candidates atomically."""
+        with self._lock:
+            generation = self._generation(f"pool_{pool}_generation")
+            rows = self._conn.execute(
+                "SELECT id, name, outbound, last_delay FROM configs"
+                " WHERE removed=0 AND pool=?"
+                " ORDER BY last_test_at IS NOT NULL, last_test_at",
+                (pool,)).fetchall()
+        if max_n and max_n > 0:
+            rows = rows[:max_n]
+        candidates = [{"id": r["id"], "name": r["name"],
+                       "outbound": json.loads(r["outbound"]),
+                       "delay": r["last_delay"]} for r in rows]
+        return {"generation": generation, "configs": candidates}
+
+    def start_test_round(self, pool: str, snapshot_generation: int,
+                         round_id: str | None = None, total: int = 0) -> str:
+        """Record the immutable metadata for a test snapshot."""
+        round_id = round_id or uuid.uuid4().hex[:8]
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO test_rounds"
+                " (id, pool, snapshot_generation, state, total)"
+                " VALUES (?,?,?,?,?)",
+                (round_id, pool, snapshot_generation, "running", total))
+        return round_id
+
+    def finish_test_round(self, round_id: str, state: str = "finished",
+                          total: int | None = None, ok: int | None = None,
+                          failed: int | None = None, stale: int | None = None,
+                          error: str | None = None) -> None:
+        fields = {"state": "?", "finished_at": "datetime('now')",
+                  "error": "?"}
+        values = [state, error]
+        for name, value in (("total", total), ("ok", ok), ("failed", failed),
+                            ("stale", stale)):
+            if value is not None:
+                fields[name] = "?"
+                values.append(value)
+        assignments = [f"{name}={value}" for name, value in fields.items()]
+        values.extend((round_id,))
+        with self._lock, self._conn:
+            self._conn.execute(
+                f"UPDATE test_rounds SET {', '.join(assignments)} WHERE id=?",
+                values)
 
     def close(self):
         with self._lock:
@@ -148,11 +246,15 @@ class Database:
                     (item["fingerprint"], item["name"], item["link"],
                      json.dumps(item["outbound"], ensure_ascii=False), sub_id))
                 added += cur.rowcount
+            if added:
+                # New imports join candidate pool A, invalidating only A's
+                # membership snapshot while preserving pool B test results.
+                self._bump_generations("a")
         return added
 
     def _apply_score(self, cid: int, delay, ping_threshold: int,
                       fail_threshold: int, promote_to: str, demote_to: str,
-                      demote_threshold: int = 0) -> str:
+                      expected_pool: str, demote_threshold: int = 0) -> str:
         """Update score/pool/last_delay for one config based on a test result.
 
         `demote_threshold` lets a caller require more than one consecutive
@@ -175,9 +277,11 @@ class Database:
         Caller must hold the connection/lock already.
         """
         row = self._conn.execute(
-            "SELECT score FROM configs WHERE id=?", (cid,)).fetchone()
-        if row is None:
-            return "skip"
+            "SELECT score, pool, removed FROM configs WHERE id=?", (cid,)).fetchone()
+        # A result only belongs to the pool from which its immutable snapshot
+        # was taken. Deleted or moved configs are stale and must not be revived.
+        if row is None or row["removed"] or row["pool"] != expected_pool:
+            return "stale"
         passed = delay is not None and delay > 0 and delay <= ping_threshold
         if passed:
             self._conn.execute(
@@ -207,43 +311,83 @@ class Database:
         return "grace"
 
     def record_pool_a_results(self, results: dict, ping_threshold: int,
-                               fail_threshold: int = -5) -> dict:
+                               fail_threshold: int = -5,
+                               round_id: str | None = None,
+                               snapshot_generation: int | None = None) -> dict:
         """results: {config_id: delay_ms or -1}. Passing configs -> pool b."""
         return self._record_round("a", results, ping_threshold, fail_threshold,
-                                   promote_to="b", demote_to="a")
+                                  promote_to="b", demote_to="a",
+                                  round_id=round_id,
+                                  snapshot_generation=snapshot_generation)
 
     def record_pool_b_results(self, results: dict, ping_threshold: int,
                                fail_threshold: int = -5,
-                               demote_grace: int = 2) -> dict:
-        """results: {config_id: delay_ms or -1}. Failing configs -> pool a,
-        but only after `demote_grace` consecutive failures."""
+                               demote_grace: int = 2,
+                               round_id: str | None = None,
+                               snapshot_generation: int | None = None) -> dict:
+        """results: {config_id: delay_ms or -1}. Failing configs -> pool a."""
         return self._record_round("b", results, ping_threshold, fail_threshold,
-                                   promote_to="b", demote_to="a",
-                                   demote_threshold=-demote_grace)
+                                  promote_to="b", demote_to="a",
+                                  demote_threshold=-demote_grace,
+                                  round_id=round_id,
+                                  snapshot_generation=snapshot_generation)
 
     def _record_round(self, pool: str, results: dict, ping_threshold: int,
-                       fail_threshold: int, promote_to: str, demote_to: str,
-                       demote_threshold: int = 0) -> dict:
-        ok = failed = 0
+                      fail_threshold: int, promote_to: str, demote_to: str,
+                      demote_threshold: int = 0, round_id: str | None = None,
+                      snapshot_generation: int | None = None) -> dict:
+        ok = failed = stale = 0
         removed_ids = []
+        changed_pools: set[str] = set()
         with self._lock, self._conn:
+            current_generation = self._generation(f"pool_{pool}_generation")
+            if snapshot_generation is None:
+                snapshot_generation = current_generation
+            generation_stale = snapshot_generation != current_generation
+            round_id = round_id or uuid.uuid4().hex[:8]
+            round_row = self._conn.execute(
+                "SELECT state, total, ok, failed, stale FROM test_rounds WHERE id=?",
+                (round_id,)).fetchone()
+            auto_finish = round_row is None
+            self._conn.execute(
+                "INSERT OR IGNORE INTO test_rounds"
+                " (id, pool, snapshot_generation, state, total) VALUES (?,?,?,?,?)",
+                (round_id, pool, snapshot_generation, "running", len(results)))
             for cid, delay in results.items():
-                outcome = self._apply_score(cid, delay, ping_threshold,
-                                            fail_threshold, promote_to, demote_to,
-                                            demote_threshold)
+                outcome = "stale" if generation_stale else self._apply_score(
+                    cid, delay, ping_threshold, fail_threshold, promote_to,
+                    demote_to, expected_pool=pool, demote_threshold=demote_threshold)
                 if outcome == "ok":
                     ok += 1
+                    if pool != promote_to:
+                        changed_pools.update((pool, promote_to))
                 elif outcome in ("failed", "grace"):
                     failed += 1
+                    if outcome == "failed" and pool != demote_to:
+                        changed_pools.update((pool, demote_to))
                 elif outcome == "removed":
                     failed += 1
                     removed_ids.append(cid)
+                    changed_pools.add(pool)
+                elif outcome == "stale":
+                    stale += 1
+            if changed_pools:
+                self._bump_generations(*changed_pools)
             self._conn.execute(
-                "INSERT INTO test_log(pool, total, ok, failed, removed)"
-                " VALUES (?,?,?,?,?)",
+                "INSERT INTO test_log(pool, total, ok, failed, removed) VALUES (?,?,?,?,?)",
                 (pool, len(results), ok, failed, len(removed_ids)))
-        return {"total": len(results), "ok": ok,
-                "failed": failed, "removed": removed_ids}
+            previous = round_row or {"total": 0, "ok": 0, "failed": 0, "stale": 0}
+            self._conn.execute(
+                "UPDATE test_rounds SET state=?, total=?, ok=?, failed=?, stale=?,"
+                " finished_at=?, error=NULL WHERE id=?",
+                ("finished" if auto_finish or generation_stale else "running",
+                 previous["total"] + len(results),
+                 previous["ok"] + ok, previous["failed"] + failed,
+                 previous["stale"] + stale,
+                 "datetime('now')" if auto_finish or generation_stale else None, round_id))
+        return {"round_id": round_id, "snapshot_generation": snapshot_generation,
+                "total": len(results), "ok": ok, "failed": failed,
+                "stale": stale, "removed": removed_ids}
 
     def get_pool_configs(self, pool: str, max_n: int = 0) -> list:
         with self._lock:
