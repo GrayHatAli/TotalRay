@@ -341,9 +341,9 @@ class Database:
         changed_pools: set[str] = set()
         with self._lock, self._conn:
             current_generation = self._generation(f"pool_{pool}_generation")
+            generation_stale = snapshot_generation is not None and snapshot_generation != current_generation
             if snapshot_generation is None:
                 snapshot_generation = current_generation
-            generation_stale = snapshot_generation != current_generation
             round_id = round_id or uuid.uuid4().hex[:8]
             round_row = self._conn.execute(
                 "SELECT state, total, ok, failed, stale FROM test_rounds WHERE id=?",
