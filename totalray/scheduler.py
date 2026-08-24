@@ -159,7 +159,13 @@ class Manager:
         if not self._internet_ok():
             self._round_state.skip("pool_a", reason="internet_down", blocked_by="internet")
             return {"total": 0, "skipped": "internet_down"}
-        snapshot = self.db.get_pool_snapshot("a")
+        test_cfg = self.settings["test"]
+        schedule_cfg = self.settings["schedule"]
+        max_items = int(schedule_cfg.get("pool_a_max_items_per_round", 0))
+        retry_backoff = int(schedule_cfg.get("pool_a_retry_backoff_minutes", 0))
+        snapshot = self.db.get_pool_snapshot(
+            "a", max_n=max_items,
+            retry_backoff_minutes=retry_backoff)
         snapshot_generation = snapshot["generation"]
         candidates = snapshot["configs"]
         rid = round_id or uuid.uuid4().hex[:8]
@@ -176,8 +182,8 @@ class Manager:
             self._round_state.start("pool_a", round_id=rid, total=len(candidates),
                                     snapshot_generation=snapshot_generation)
         tester = GroupTester(self.settings)
-        ping_threshold = int(self.settings["test"]["ping_threshold_ms"])
-        fail_threshold = int(self.settings["test"]["fail_threshold"])
+        ping_threshold = int(test_cfg["ping_threshold_ms"])
+        fail_threshold = int(test_cfg["fail_threshold"])
         aggregate: dict = {"total": 0, "ok": 0, "failed": 0, "stale": 0, "removed": []}
 
         def persist_chunk(_items, chunk_results):

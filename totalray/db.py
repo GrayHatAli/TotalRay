@@ -131,8 +131,15 @@ class Database:
         with self._lock:
             return self._generation(f"pool_{pool}_generation")
 
-    def get_pool_snapshot(self, pool: str, max_n: int = 0) -> dict:
-        """Capture a pool's membership generation and candidates atomically."""
+    def get_pool_snapshot(self, pool: str, max_n: int = 0,
+                          cursor_enabled: bool = False,
+                          retry_backoff_minutes: int = 0) -> dict:
+        """Capture a pool's membership generation and candidates atomically.
+
+        When enabled, candidates are ordered oldest-first and recently tested
+        rows can be left for a later round, allowing bounded scans to make
+        steady progress without repeatedly probing the same configs.
+        """
         with self._lock:
             generation = self._generation(f"pool_{pool}_generation")
             rows = self._conn.execute(
@@ -140,6 +147,11 @@ class Database:
                 " WHERE removed=0 AND pool=?"
                 " ORDER BY last_test_at IS NOT NULL, last_test_at",
                 (pool,)).fetchall()
+        if retry_backoff_minutes > 0:
+            import datetime
+            cutoff = datetime.datetime.utcnow() - datetime.timedelta(minutes=retry_backoff_minutes)
+            rows = [r for r in rows if r["last_test_at"] is None or
+                    str(r["last_test_at"])[:19] <= cutoff.strftime("%Y-%m-%d %H:%M:%S")]
         if max_n and max_n > 0:
             rows = rows[:max_n]
         candidates = [{"id": r["id"], "name": r["name"],

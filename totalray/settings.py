@@ -13,6 +13,10 @@ DEFAULTS: dict = {
         "pool_a_test_minutes": 15,
         "pool_b_test_minutes": 3,
         "rules_update_hours": 24,
+        "pool_a_max_items_per_round": 0,
+        "pool_a_target_verified_count": 0,
+        "pool_a_cursor_enabled": True,
+        "pool_a_retry_backoff_minutes": 0,
     },
     "test": {
         "url": "https://www.gstatic.com/generate_204",
@@ -24,6 +28,10 @@ DEFAULTS: dict = {
         "max_in_group": 50,
         "base_port": 24000,
         "chunk_size": 96,
+        "pool_a_max_items_per_round": 0,
+        "pool_a_target_verified_count": 0,
+        "pool_a_cursor_enabled": True,
+        "pool_a_retry_backoff_minutes": 0,
     },
     "proxy_group": {
         "urltest_interval": "3m",
