@@ -165,28 +165,41 @@ class Manager:
         if not self._internet_ok():
             self._round_state.skip("pool_a", reason="internet_down", blocked_by="internet")
             return {"total": 0, "skipped": "internet_down"}
-        candidates = self.db.get_pool_candidates("a")
+        snapshot = self.db.get_pool_snapshot("a")
+        snapshot_generation = snapshot["generation"]
+        candidates = snapshot["configs"]
+        rid = round_id or uuid.uuid4().hex[:8]
         if not candidates:
             log.warning("no configs in pool A to test")
-            rid = round_id or uuid.uuid4().hex[:8]
-            self._round_state.start("pool_a", round_id=rid, total=0)
+            self.db.start_test_round("a", snapshot_generation, rid, total=0)
+            self._round_state.start("pool_a", round_id=rid, total=0,
+                                    snapshot_generation=snapshot_generation)
             self._round_state.finish("pool_a", success=True)
             return {"total": 0}
-        rid = round_id or uuid.uuid4().hex[:8]
+        self.db.start_test_round("a", snapshot_generation, rid, total=len(candidates))
         existing = (self._round_state.snapshot().get("pool_a") or {}).get("state")
         if existing != "running":
-            self._round_state.start("pool_a", round_id=rid, total=len(candidates))
+            self._round_state.start("pool_a", round_id=rid, total=len(candidates),
+                                    snapshot_generation=snapshot_generation)
         tester = GroupTester(self.settings)
         ping_threshold = int(self.settings["test"]["ping_threshold_ms"])
         fail_threshold = int(self.settings["test"]["fail_threshold"])
-        aggregate: dict = {"total": 0, "ok": 0, "failed": 0, "removed": []}
+        aggregate: dict = {"total": 0, "ok": 0, "failed": 0, "stale": 0, "removed": []}
 
         def persist_chunk(_items, chunk_results):
+            # A chunk commit may advance pool A's generation by promoting
+            # configs. Validate the first chunk against the immutable
+            # snapshot; subsequent chunks use the post-commit generation so
+            # the round does not invalidate its own remaining work.
+            chunk_generation = (snapshot_generation if aggregate["total"] == 0
+                                else self.db.pool_generation("a"))
             chunk_stats = self.db.record_pool_a_results(
-                chunk_results, ping_threshold, fail_threshold)
+                chunk_results, ping_threshold, fail_threshold,
+                round_id=rid, snapshot_generation=chunk_generation)
             aggregate["total"] += chunk_stats["total"]
             aggregate["ok"] += chunk_stats["ok"]
             aggregate["failed"] += chunk_stats["failed"]
+            aggregate["stale"] = aggregate.get("stale", 0) + chunk_stats.get("stale", 0)
             aggregate["removed"].extend(chunk_stats["removed"])
             self._round_state.progress(
                 "pool_a", processed=aggregate["total"],
@@ -199,6 +212,10 @@ class Manager:
         try:
             tester.test_all(candidates, on_chunk=persist_chunk)
         except Exception as exc:
+            self.db.finish_test_round(
+                rid, state="failed", total=aggregate["total"],
+                ok=aggregate["ok"], failed=aggregate["failed"],
+                stale=aggregate.get("stale", 0), error=str(exc)[:400])
             self._round_state.finish("pool_a", success=False, error=str(exc)[:400])
             raise
         log.info("pool-A round done: %d tested | %d promoted to pool B |"
@@ -206,37 +223,50 @@ class Manager:
                  aggregate["total"], aggregate["ok"],
                  aggregate["failed"] - len(aggregate["removed"]),
                  len(aggregate["removed"]), fail_threshold, ping_threshold)
+        self.db.finish_test_round(
+            rid, total=aggregate["total"], ok=aggregate["ok"],
+            failed=aggregate["failed"], stale=aggregate.get("stale", 0))
         self._round_state.finish(
             "pool_a", success=True,
             items_total=aggregate["total"],
             items_processed=aggregate["total"],
             items_ok=aggregate["ok"],
-            items_failed=aggregate["failed"])
+            items_failed=aggregate["failed"], stale=aggregate.get("stale", 0))
         return aggregate
 
     def run_pool_b_round(self, round_id: str | None = None) -> dict:
         if not self._internet_ok():
             self._round_state.skip("pool_b", reason="internet_down", blocked_by="internet")
             return {"total": 0, "skipped": "internet_down"}
-        candidates = self.db.get_pool_candidates("b")
+        snapshot = self.db.get_pool_snapshot("b")
+        snapshot_generation = snapshot["generation"]
+        candidates = snapshot["configs"]
+        rid = round_id or uuid.uuid4().hex[:8]
         if not candidates:
             log.warning("no configs in pool B to test yet"
                         " (nothing has been promoted from pool A)")
-            rid = round_id or uuid.uuid4().hex[:8]
-            self._round_state.start("pool_b", round_id=rid, total=0)
+            self.db.start_test_round("b", snapshot_generation, rid, total=0)
+            self._round_state.start("pool_b", round_id=rid, total=0,
+                                    snapshot_generation=snapshot_generation)
             self._round_state.finish("pool_b", success=True)
             return {"total": 0}
-        rid = round_id or uuid.uuid4().hex[:8]
+        self.db.start_test_round("b", snapshot_generation, rid, total=len(candidates))
         existing = (self._round_state.snapshot().get("pool_b") or {}).get("state")
         if existing != "running":
-            self._round_state.start("pool_b", round_id=rid, total=len(candidates))
+            self._round_state.start("pool_b", round_id=rid, total=len(candidates),
+                                    snapshot_generation=snapshot_generation)
         tester = GroupTester(self.settings)
         results = tester.test_all(candidates)
         ping_threshold = int(self.settings["test"]["ping_threshold_ms"])
         fail_threshold = int(self.settings["test"]["fail_threshold"])
         try:
-            stats = self.db.record_pool_b_results(results, ping_threshold, fail_threshold)
+            stats = self.db.record_pool_b_results(
+                results, ping_threshold, fail_threshold,
+                round_id=rid, snapshot_generation=snapshot_generation)
         except Exception as exc:
+            self.db.finish_test_round(
+                rid, state="failed", total=len(results), ok=0, failed=0,
+                stale=0, error=str(exc)[:400])
             self._round_state.finish("pool_b", success=False, error=str(exc)[:400])
             raise
         log.info("pool-B round done: %d tested | %d still healthy |"
@@ -250,12 +280,15 @@ class Manager:
         with self._apply_lock:
             ok, msg = builder.rebuild_and_apply(self.settings, self.db)
         log.info("config applied: %s - %s", ok, msg)
+        self.db.finish_test_round(
+            rid, total=stats["total"], ok=stats["ok"],
+            failed=stats["failed"], stale=stats.get("stale", 0))
         self._round_state.finish(
             "pool_b", success=True,
             items_total=stats["total"],
             items_processed=stats["total"],
             items_ok=stats["ok"],
-            items_failed=stats["failed"])
+            items_failed=stats["failed"], stale=stats.get("stale", 0))
         return stats
 
     def bootstrap(self):
