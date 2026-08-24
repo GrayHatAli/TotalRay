@@ -135,7 +135,7 @@ class TestLiveMonitorHealthCheck:
 
     def test_api_unavailable_returns_healthy(self):
         """When Clash API is unavailable, don't count as error."""
-        settings = Mock()
+        settings = Mock(data_dir="/tmp/totalray-test")
         settings.data = {"clash_api": {"listen": "127.0.0.1:9090", "secret": ""}}
         db = Mock()
         
@@ -148,7 +148,7 @@ class TestLiveMonitorHealthCheck:
 
     def test_short_lived_connections_detected_as_errors(self):
         """Multiple short-lived connections indicate degradation."""
-        settings = Mock()
+        settings = Mock(data_dir="/tmp/totalray-test")
         settings.data = {"clash_api": {"listen": "127.0.0.1:9090", "secret": ""}}
         db = Mock()
         
@@ -174,7 +174,7 @@ class TestLiveMonitorHealthCheck:
 
     def test_zero_throughput_not_counted_immediately(self):
         """Zero throughput on new connections shouldn't immediately trigger errors."""
-        settings = Mock()
+        settings = Mock(data_dir="/tmp/totalray-test")
         settings.data = {"clash_api": {"listen": "127.0.0.1:9090", "secret": ""}}
         db = Mock()
         
@@ -198,7 +198,7 @@ class TestLiveMonitorHealthCheck:
 
     def test_computes_throughput_metrics(self):
         """Health check should compute average throughput metrics."""
-        settings = Mock()
+        settings = Mock(data_dir="/tmp/totalray-test")
         settings.data = {"clash_api": {"listen": "127.0.0.1:9090", "secret": ""}}
         db = Mock()
         
@@ -225,7 +225,7 @@ class TestLiveMonitorFailover:
 
     def test_get_next_best_server_excludes_current(self):
         """Next best server should not be the current server."""
-        settings = Mock()
+        settings = Mock(data_dir="/tmp/totalray-test")
         settings.data = {"clash_api": {"listen": "127.0.0.1:9090", "secret": ""}}
         db = Mock()
         
@@ -248,7 +248,7 @@ class TestLiveMonitorFailover:
 
     def test_get_next_best_server_skips_poor_latency(self):
         """Servers with poor latency (>2000ms) should be skipped."""
-        settings = Mock()
+        settings = Mock(data_dir="/tmp/totalray-test")
         settings.data = {"clash_api": {"listen": "127.0.0.1:9090", "secret": ""}}
         db = Mock()
         
@@ -267,7 +267,7 @@ class TestLiveMonitorFailover:
 
     def test_cooldown_prevents_rapid_failover(self):
         """Cooldown period should prevent rapid successive failovers."""
-        settings = Mock()
+        settings = Mock(data_dir="/tmp/totalray-test")
         settings.data = {"clash_api": {"listen": "127.0.0.1:9090", "secret": ""}}
         db = Mock()
         
