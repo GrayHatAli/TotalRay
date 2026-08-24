@@ -21,7 +21,8 @@ class Manager:
     def __init__(self, settings, db):
         self.settings = settings
         self.db = db
-        self._job_lock = threading.Lock()
+        self._subscription_lock = threading.Lock()
+        self._rules_lock = threading.Lock()
         # Pool A and Pool B may test concurrently, but sing-box config writes
         # and restarts must remain serialized to avoid route/config races.
         self._apply_lock = threading.Lock()
@@ -82,9 +83,9 @@ class Manager:
 
     # ---------------------------------------------------- jobs
     def job_update_subs(self):
-        if not self._job_lock.acquire(blocking=False):
-            self._round_state.skip("subscriptions", reason="busy", blocked_by="job_lock")
-            log.info("another job is already running; skipping subscription update")
+        if not self._subscription_lock.acquire(blocking=False):
+            self._round_state.skip("subscriptions", reason="busy", blocked_by="subscription_update")
+            log.info("another subscription update is already running; skipping")
             return
         round_id = uuid.uuid4().hex[:8]
         self._round_state.start("subscriptions", round_id=round_id)
@@ -97,20 +98,19 @@ class Manager:
             log.exception("error updating subscriptions")
             self._round_state.finish("subscriptions", success=False, error=str(exc)[:400])
         finally:
-            self._job_lock.release()
+            self._subscription_lock.release()
 
     def job_test_pool_a(self):
-        if not self._job_lock.acquire(blocking=False):
-            self._round_state.skip("pool_a", reason="busy", blocked_by="job_lock")
-            log.info("another job is already running; skipping pool-A test round")
+        current = self._round_state.snapshot().get("pool_a") or {}
+        if current.get("state") == "running":
+            self._round_state.skip("pool_a", reason="already_running", blocked_by="pool_a")
+            log.info("pool-A round already in progress; skipping duplicate schedule")
             return
         try:
             log.info("starting pool-A (candidate) test round...")
             self.run_pool_a_round()
         except Exception:  # noqa: BLE001
             log.exception("error during pool-A test round")
-        finally:
-            self._job_lock.release()
 
     def job_test_pool_b(self):
         # Pool B is deliberately independent from Pool A. It must continue
@@ -128,8 +128,8 @@ class Manager:
             log.exception("error during pool-B test round")
 
     def job_update_rules(self):
-        if not self._job_lock.acquire(blocking=False):
-            self._round_state.skip("rules", reason="busy", blocked_by="job_lock")
+        if not self._rules_lock.acquire(blocking=False):
+            self._round_state.skip("rules", reason="busy", blocked_by="rules_update")
             return
         round_id = uuid.uuid4().hex[:8]
         self._round_state.start("rules", round_id=round_id)
@@ -143,22 +143,16 @@ class Manager:
             log.exception("error updating rule-sets")
             self._round_state.finish("rules", success=False, error=str(exc)[:400])
         finally:
-            self._job_lock.release()
+            self._rules_lock.release()
 
     def job_sample_traffic(self):
-        if not self._job_lock.acquire(blocking=False):
-            log.debug("another job is already running; skipping traffic sample")
-            return
         try:
-            try:
-                devs = traffic.get_device_stats(self.settings)
-                if devs:
-                    self.db.record_device_stats(devs)
-                    log.debug("sampled %d devices", len(devs))
-            except Exception:  # noqa: BLE001
-                log.exception("error sampling device traffic")
-        finally:
-            self._job_lock.release()
+            devs = traffic.get_device_stats(self.settings)
+            if devs:
+                self.db.record_device_stats(devs)
+                log.debug("sampled %d devices", len(devs))
+        except Exception:  # noqa: BLE001
+            log.exception("error sampling device traffic")
 
     # ---------------------------------------------------- core logic
     def run_pool_a_round(self, round_id: str | None = None) -> dict:
