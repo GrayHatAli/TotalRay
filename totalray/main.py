@@ -123,8 +123,9 @@ def cmd_test_b(args):
 
 def cmd_build(args):
     settings, db = _load(args)
-    from . import builder
-    ok, msg = builder.rebuild_and_apply(settings, db)
+    from .coordinator import ApplyCoordinator
+    coordinator = ApplyCoordinator(settings, db)
+    ok, msg = coordinator.apply()
     print(("OK: " if ok else "FAILED: ") + msg)
     db.close()
     sys.exit(0 if ok else 1)
@@ -228,6 +229,15 @@ def _read_round_status(settings) -> dict:
             return json.load(fh)
     except (OSError, ValueError):
         return {}
+
+
+def _read_apply_state(settings) -> dict | None:
+    path = os.path.join(settings.data_dir, "apply_state.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
 
 
 def _round_wait_reason(current: dict) -> str:
@@ -415,6 +425,25 @@ def cmd_status(args):
               f" last failover: {_fmt_ago(lm.get('last_failover'))}")
     else:
         print("live monitor  : status unknown (no heartbeat file yet - restart totalray.service)")
+
+    # -- apply coordinator --------------------------------------------------
+    apply_state = _read_apply_state(settings)
+    if apply_state:
+        last_at = apply_state.get("last_restart_at")
+        reason = apply_state.get("last_restart_reason", "-")
+        ok = apply_state.get("last_restart_ok", False)
+        circuit = apply_state.get("circuit_open", False)
+        restarts = apply_state.get("restart_count_total", 0)
+        failures = apply_state.get("restart_failures_total", 0)
+        last_display = _fmt_ago(last_at) if last_at else "-"
+        circuit_display = "OPEN (restarts paused)" if circuit else "closed"
+        print(f"apply         : {circuit_display} | {restarts} restarts |"
+              f" {failures} failures | last={last_display}")
+        if last_at and reason:
+            print(f"  last reason : {reason.replace('_', ' ')}"
+                  f" ({'ok' if ok else 'failed'})")
+    else:
+        print("apply         : no restart history yet")
 
     # -- subscriptions ----------------------------------------------------
     print()

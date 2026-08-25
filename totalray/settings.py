@@ -85,6 +85,15 @@ DEFAULTS: dict = {
         "username": "totalray",
         "password": "CHANGE_ME",
     },
+    "apply": {
+        # ApplyCoordinator settings -- controls restart throttling and
+        # circuit breaker for sing-box restarts.
+        "restart_cooldown_seconds": 60,
+        "max_restarts_per_window": 5,
+        "restart_window_seconds": 600,
+        "health_check_retries": 3,
+        "health_check_delay_seconds": 2.0,
+    },
     "paths": {
         "data_dir": "/var/lib/totalray",
         "rules_dir": "/etc/sing-box/rules",

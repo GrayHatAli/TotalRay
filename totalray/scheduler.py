@@ -9,6 +9,7 @@ import uuid
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import builder, net, rulesets, subfetch
+from .coordinator import ApplyCoordinator, REASON_MEMBERSHIP_CHANGED, REASON_RULES_UPDATED
 from .tester import GroupTester
 from . import traffic
 from .live_monitor import create_monitor
@@ -25,7 +26,7 @@ class Manager:
         self._rules_lock = threading.Lock()
         # Pool A and Pool B may test concurrently, but sing-box config writes
         # and restarts must remain serialized to avoid route/config races.
-        self._apply_lock = threading.Lock()
+        self._coordinator = ApplyCoordinator(settings, db)
         self._internet_was_down = False
         self._live_monitor = None
         self._round_status_path = os.path.join(
@@ -136,7 +137,7 @@ class Manager:
         try:
             log.info("updating rule-sets...")
             rulesets.update_rulesets(self.settings)
-            ok, msg = builder.rebuild_and_apply(self.settings, self.db, force=True)
+            ok, msg = self._coordinator.apply(reason=REASON_RULES_UPDATED, force=True)
             log.info("config applied after rule-set update: %s %s", ok, msg)
             self._round_state.finish("rules", success=ok, error=None if ok else msg[:400])
         except Exception as exc:  # noqa: BLE001
@@ -205,8 +206,7 @@ class Manager:
                 "pool_a", processed=aggregate["total"],
                 ok=aggregate["ok"], failed=aggregate["failed"],
                 stale=chunk_stats.get("stale", 0))
-            with self._apply_lock:
-                ok, msg = builder.rebuild_and_apply(self.settings, self.db)
+            ok, msg = self._coordinator.apply(reason=REASON_MEMBERSHIP_CHANGED)
             log.info("chunk config applied: %s - %s", ok, msg)
 
         try:
@@ -277,8 +277,7 @@ class Manager:
         self._round_state.progress(
             "pool_b", processed=stats["total"],
             ok=stats["ok"], failed=stats["failed"], stale=stats.get("stale", 0))
-        with self._apply_lock:
-            ok, msg = builder.rebuild_and_apply(self.settings, self.db)
+        ok, msg = self._coordinator.apply(reason=REASON_MEMBERSHIP_CHANGED)
         log.info("config applied: %s - %s", ok, msg)
         self.db.finish_test_round(
             rid, total=stats["total"], ok=stats["ok"],
