@@ -466,17 +466,17 @@ feat: centralize sing-box apply and restart recovery
 
 ## کارها
 
-- [ ] نمایش state هر job: `idle/running/queued/skipped/failed`
-- [ ] نمایش `blocked_by`
-- [ ] نمایش progress: `processed/total`
-- [ ] نمایش generation و round id
-- [ ] نمایش آخرین commit دیتابیس
-- [ ] نمایش آخرین apply sing-box
-- [ ] نمایش تعداد restart و failure
-- [ ] نمایش public exit IP به‌عنوان مقدار مستقل از TUN IP
-- [ ] حفظ bounded بودن تمام probeها
-- [ ] عدم چاپ raw exceptionهای طولانی
-- [ ] خروجی machine-readable اختیاری با `--json`
+- [x] نمایش state هر job: `idle/running/queued/skipped/failed`
+- [x] نمایش `blocked_by`
+- [x] نمایش progress: `processed/total`
+- [x] نمایش generation و round id
+- [x] نمایش آخرین commit دیتابیس
+- [x] نمایش آخرین apply sing-box
+- [x] نمایش تعداد restart و failure
+- [x] نمایش public exit IP به‌عنوان مقدار مستقل از TUN IP
+- [x] حفظ bounded بودن تمام probeها
+- [x] عدم چاپ raw exceptionهای طولانی
+- [x] خروجی machine-readable اختیاری با `--json`
 
 ## نمونهٔ خروجی هدف
 
@@ -491,9 +491,9 @@ TUN: 172.19.0.1/30 | internal only
 
 ## معیار پذیرش
 
-- کاربر بتواند بفهمد یک job واقعاً در حال اجراست یا فقط زمان قدیمی دارد.
-- status در زمان خرابی upstream سریع برگردد.
-- تفاوت TUN address و public exit IP واضح باشد.
+- [x] کاربر بتواند بفهمد یک job واقعاً در حال اجراست یا فقط زمان قدیمی دارد.
+- [x] status در زمان خرابی upstream سریع برگردد.
+- [x] تفاوت TUN address و public exit IP واضح باشد.
 
 ## Commit پیشنهادی
 

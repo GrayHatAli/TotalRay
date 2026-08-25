@@ -240,6 +240,114 @@ def _read_apply_state(settings) -> dict | None:
         return None
 
 
+def _status_snapshot(settings, db) -> dict:
+    """Collect every status section into a single dict for --json output."""
+    stats = db.stats()
+    sched = settings["schedule"]
+    round_status = _read_round_status(settings)
+    apply_state = _read_apply_state(settings)
+    lm = _read_live_monitor_status(settings)
+
+    # -- connection --------------------------------------------------------
+    status_line = _live_connection_status(settings, db)
+    totals = _get_traffic_totals(settings)
+
+    # -- apply coordinator -------------------------------------------------
+    apply = {"available": apply_state is not None}
+    if apply_state:
+        apply.update({
+            "circuit_open": apply_state.get("circuit_open", False),
+            "restarts_total": apply_state.get("restart_count_total", 0),
+            "restart_failures_total": apply_state.get("restart_failures_total", 0),
+            "last_restart_at": apply_state.get("last_restart_at"),
+            "last_restart_reason": apply_state.get("last_restart_reason"),
+            "last_restart_ok": apply_state.get("last_restart_ok", False),
+        })
+
+    # -- subscriptions -----------------------------------------------------
+    subs = db.list_subscriptions()
+    sub_minutes = int(sched.get("sub_update_minutes", 30))
+    health_by_sub = db.configs_health_by_sub()
+    sub_list = []
+    for sub in subs:
+        rs = round_status.get("subscriptions") or {}
+        sub_list.append({
+            "id": sub["id"],
+            "url": sub["url"],
+            "enabled": bool(sub.get("enabled", 1)),
+            "last_count": sub.get("last_count"),
+            "healthy": health_by_sub.get(sub["id"], 0),
+            "last_update": sub.get("last_update"),
+            "state": rs.get("state", "idle"),
+            "round_id": rs.get("round_id"),
+        })
+
+    # -- pool A ------------------------------------------------------------
+    pa = round_status.get("pool_a") or {}
+    pool_a = {
+        "count": stats["pool_a"],
+        "last_round": stats["last_test_a"],
+        "state": pa.get("state", "idle"),
+        "round_id": pa.get("round_id"),
+        "snapshot_generation": pa.get("snapshot_generation"),
+        "items_total": pa.get("items_total"),
+        "items_processed": pa.get("items_processed"),
+        "items_ok": pa.get("items_ok"),
+        "items_failed": pa.get("items_failed"),
+        "last_error": pa.get("last_error"),
+    }
+
+    # -- pool B ------------------------------------------------------------
+    pb = round_status.get("pool_b") or {}
+    pool_b = {
+        "count": stats["pool_b"],
+        "last_round": stats["last_test_b"],
+        "state": pb.get("state", "idle"),
+        "round_id": pb.get("round_id"),
+        "snapshot_generation": pb.get("snapshot_generation"),
+        "items_total": pb.get("items_total"),
+        "items_processed": pb.get("items_processed"),
+        "items_ok": pb.get("items_ok"),
+        "items_failed": pb.get("items_failed"),
+        "last_error": pb.get("last_error"),
+    }
+
+    # -- devices -----------------------------------------------------------
+    devices = []
+    try:
+        devs = db.get_device_totals()
+        if not devs:
+            from .traffic import get_device_stats
+            devs = get_device_stats(settings)
+        if devs:
+            for d in devs:
+                devices.append({
+                    "ip": d.get("ip"),
+                    "last_seen": d.get("last_seen"),
+                    "rx": d.get("last_rx", d.get("download", 0)),
+                    "tx": d.get("last_tx", d.get("upload", 0)),
+                })
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {
+        "status_line": status_line,
+        "traffic": {"down": totals[0], "up": totals[1]} if totals else None,
+        "live_monitor": lm,
+        "apply": apply,
+        "subscriptions": sub_list,
+        "configs": {
+            "total": stats["total"],
+            "pool_a": stats["pool_a"],
+            "pool_b": stats["pool_b"],
+            "removed": stats["removed"],
+        },
+        "pool_a": pool_a,
+        "pool_b": pool_b,
+        "devices": devices,
+    }
+
+
 def _round_wait_reason(current: dict) -> str:
     """Render the human reason for a queued/skipped round, e.g.
     'internet down (blocked by internet)' or just 'busy'."""
@@ -399,6 +507,14 @@ def _live_connection_status(settings, db) -> str:
 
 def cmd_status(args):
     settings, db = _load(args)
+
+    # -- JSON output mode ---------------------------------------------------
+    if getattr(args, "json", False):
+        data = _status_snapshot(settings, db)
+        print(json.dumps(data, default=str, indent=2))
+        db.close()
+        return
+
     stats = db.stats()
     last_a = stats["last_test_a"]
     last_b = stats["last_test_b"]
@@ -483,9 +599,10 @@ def cmd_status(args):
     print()
     print(_title_bar("Pool A"))
     pool_a_minutes = int(sched.get("pool_a_test_minutes", 15))
+    pa = round_status.get("pool_a") or {}
     # Show live round state even when the database has no finished round yet
     # (e.g. the first-ever round is still running).
-    if last_a or (round_status.get("pool_a") or {}).get("state"):
+    if last_a or pa.get("state"):
         last_a_ts = last_a["ts"] if last_a else None
         last_display, next_display = _round_display(
             round_status, "pool_a", _fmt_hhmm(last_a_ts),
@@ -495,6 +612,15 @@ def cmd_status(args):
                    last_a["removed"] if last_a else "-",
                    last_display, next_display]]
         print(_fmt_table(["Total", "Promoted", "Removed", "Last Round", "Next Round"], rows_a))
+        gen = pa.get("snapshot_generation")
+        rid = pa.get("round_id")
+        if gen is not None or rid:
+            parts = []
+            if gen is not None:
+                parts.append(f"generation={gen}")
+            if rid:
+                parts.append(f"round={rid}")
+            print(f"  {', '.join(parts)}")
     else:
         print("  (no pool-A test rounds yet)")
     worst = db.worst_configs(5)
@@ -507,7 +633,8 @@ def cmd_status(args):
     print()
     print(_title_bar("Pool B"))
     pool_b_minutes = int(sched.get("pool_b_test_minutes", 3))
-    if last_b or (round_status.get("pool_b") or {}).get("state"):
+    pb = round_status.get("pool_b") or {}
+    if last_b or pb.get("state"):
         last_b_ts = last_b["ts"] if last_b else None
         last_display, next_display = _round_display(
             round_status, "pool_b", _fmt_hhmm(last_b_ts),
@@ -517,6 +644,15 @@ def cmd_status(args):
                    last_b["failed"] if last_b else "-",
                    last_display, next_display]]
         print(_fmt_table(["Total", "Healthy", "Demoted", "Last Round", "Next Round"], rows_b))
+        gen = pb.get("snapshot_generation")
+        rid = pb.get("round_id")
+        if gen is not None or rid:
+            parts = []
+            if gen is not None:
+                parts.append(f"generation={gen}")
+            if rid:
+                parts.append(f"round={rid}")
+            print(f"  {', '.join(parts)}")
     else:
         print("  (no pool-B test rounds yet)")
     top = db.top_configs(5)
@@ -661,7 +797,10 @@ def main(argv=None):
     sub.add_parser("test-b", help="run one pool-B (verified) test round").set_defaults(fn=cmd_test_b)
     sub.add_parser("build", help="build and apply the sing-box config").set_defaults(fn=cmd_build)
     sub.add_parser("run", help="run the scheduler daemon (service)").set_defaults(fn=cmd_run)
-    sub.add_parser("status", help="status and ranking of configs").set_defaults(fn=cmd_status)
+    p = sub.add_parser("status", help="status and ranking of configs")
+    p.add_argument("--json", action="store_true",
+                   help="print machine-readable JSON output")
+    p.set_defaults(fn=cmd_status)
     p = sub.add_parser("failed-requests", help="show recent failed HTTP requests")
     p.add_argument("-n", "--lines", type=int, default=20, help="number of recent entries to show")
     p.add_argument("--json", action="store_true", help="print raw JSON lines")
