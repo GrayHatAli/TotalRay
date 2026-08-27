@@ -3,7 +3,7 @@
 Covers:
   - circuit breaker opens after max restarts in window
   - circuit breaker half-open after window expires
-  - cooldown prevents rapid successive restarts
+  - rapid applies are not blocked (circuit breaker is the safety net)
   - force=True bypasses cooldown
   - health check failure is tracked as a failed restart
   - status dict reflects coordinator state
@@ -149,7 +149,10 @@ class TestApplyCoordinator:
 
         assert ok is True
 
-    def test_cooldown_prevents_rapid_restart(self, tmp_path):
+    def test_rapid_applies_not_blocked(self, tmp_path):
+        """Membership changes (Pool A chunk commits) must not be blocked
+        by a cooldown -- the circuit breaker alone prevents restart loops.
+        """
         settings = _make_settings(tmp_path, restart_cooldown_seconds=5)
         db = _make_db()
         coord = ApplyCoordinator(settings, db)
@@ -157,10 +160,12 @@ class TestApplyCoordinator:
         with _patch_builder(True, "1 configs in group"), _patch_health(True):
             coord.apply(reason="r1")
 
-        # Immediate second apply should be blocked by cooldown
-        ok, msg = coord.apply(reason="r2")
-        assert ok is False
-        assert "cooldown" in msg
+        # Second apply should succeed immediately (no cooldown)
+        with _patch_builder(True, "1 configs in group"), _patch_health(True):
+            ok, msg = coord.apply(reason="r2")
+
+        assert ok is True
+        assert coord.status["restarts_total"] == 2
 
     def test_force_bypasses_cooldown(self, tmp_path):
         settings = _make_settings(tmp_path, restart_cooldown_seconds=999)
@@ -170,7 +175,7 @@ class TestApplyCoordinator:
         with _patch_builder(True, "1 configs in group"), _patch_health(True):
             coord.apply(reason="r1")
 
-        # force=True should bypass cooldown
+        # force=True should always delegate to builder
         with _patch_builder(True, "1 configs in group"), _patch_health(True):
             ok, msg = coord.apply(force=True, reason="forced")
 

@@ -161,17 +161,6 @@ class ApplyCoordinator:
                 "allowing one attempt", elapsed)
             self._circuit_open = False
 
-        # ── cooldown check ───────────────────────────────────────────
-        if (self._last_restart_at is not None
-                and self._last_restart_ok
-                and not force):
-            since = time.time() - self._last_restart_at
-            if since < self._cooldown_seconds:
-                log.info(
-                    "apply coordinator: cooldown %.0fs / %.0fs; "
-                    "skipping (reason=%s)",
-                    since, self._cooldown_seconds, reason)
-                return False, "restart cooldown active"
 
         # ── delegate to builder ──────────────────────────────────────
         # The tag-comparison inside builder.rebuild_and_apply decides
