@@ -59,13 +59,6 @@ class RoundStateStore:
                 log.debug("could not write round status: %s", exc)
             return current.copy()
 
-    def queue(self, kind: str, reason: str | None = None,
-              blocked_by: str | None = None, **fields: Any) -> dict[str, Any]:
-        values = {"state": "queued", "running": False, "reason": reason,
-                  "blocked_by": blocked_by}
-        values.update(fields)
-        return self.update(kind, **values)
-
     def start(self, kind: str, round_id: str | None = None,
               total: int | None = None, **fields: Any) -> dict[str, Any]:
         if round_id is None:

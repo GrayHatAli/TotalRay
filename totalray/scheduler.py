@@ -8,7 +8,7 @@ import uuid
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import builder, net, rulesets, subfetch
+from . import net, rulesets, subfetch
 from .coordinator import ApplyCoordinator, REASON_MEMBERSHIP_CHANGED, REASON_RULES_UPDATED
 from .tester import GroupTester
 from . import traffic

@@ -72,30 +72,6 @@ class HTTPClient:
             self._log_failure('GET', url, kwargs, exc)
             raise
 
-    def request(self, method: str, url: str, timeout: int = 20, **kwargs) -> requests.Response:
-        try:
-            resp = self.session.request(method, url, timeout=timeout, **kwargs)
-            if not (200 <= getattr(resp, "status_code", 0) < 300):
-                try:
-                    snippet = (resp.text[:800] if hasattr(resp, "text") else "")
-                except Exception:
-                    snippet = ""
-                entry = {
-                    'ts': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
-                    'method': method,
-                    'url': url,
-                    'status_code': getattr(resp, 'status_code', None),
-                    'response_snippet': snippet,
-                }
-                try:
-                    self.failed_logger.record(entry)
-                except Exception:
-                    log.debug('could not record non-2xx response')
-            return resp
-        except Exception as exc:
-            self._log_failure(method, url, kwargs, exc)
-            raise
-
     def _log_failure(self, method: str, url: str, kwargs: dict[str, Any], exc: Exception) -> None:
         entry = {
             'ts': time.strftime('%Y-%m-%dT%H:%M:%S%z'),

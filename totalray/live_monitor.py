@@ -14,7 +14,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Callable
 
 import requests
@@ -205,7 +205,6 @@ class LiveMonitor:
 
         # Analyze connection patterns - check last 50 connections
         short_lived_count = 0
-        zero_throughput_count = 0
         
         for conn in connections[-50:]:
             # Look for connections that closed very quickly (< 1s)
@@ -229,16 +228,12 @@ class LiveMonitor:
                     # Can't parse timestamp, skip duration check
                     pass
 
-            # Check for zero throughput on connections that should be active
+            # Accumulate per-connection throughput for the sample
             download = conn.get("download", 0) or 0
             upload = conn.get("upload", 0) or 0
             total_download += download
             total_upload += upload
             
-            # If connection has been alive for > 5 seconds but has zero throughput,
-            # it might be stuck (but don't count streaming idle periods as errors)
-            if duration > 5.0 and download == 0 and upload == 0:
-                zero_throughput_count += 1
 
         # Create sample with computed metrics
         sample = ConnectionSample(
@@ -260,22 +255,6 @@ class LiveMonitor:
         threshold = self.error_threshold
         is_healthy = not self._quality.is_degraded(threshold)
         return is_healthy, error_count
-
-    def _try_ping_fallback(self, tag: str) -> bool:
-        """Quick connectivity check for a fallback server tag.
-
-        This is a lightweight check - just verify the server was recently
-        tested and had a good latency. Full testing happens in pool-B rounds.
-        """
-        configs = self.db.get_pool_configs("b", max_n=10)
-        for cfg in configs:
-            cfg_tag = f"cfg-{cfg['id']}"
-            if cfg_tag == tag:
-                continue
-            # Check if this config has a recent good latency
-            if cfg.get("delay") and cfg["delay"] > 0 and cfg["delay"] < 2000:
-                return True
-        return False
 
     def _get_next_best_server(self, current_tag: str) -> str | None:
         """Get the next best server from pool-B, excluding current."""
@@ -394,17 +373,6 @@ class LiveMonitor:
         if self._thread:
             self._thread.join(timeout=5)
             self._thread = None
-
-    def get_status(self) -> dict:
-        """Get current monitor status."""
-        return {
-            "running": self._running,
-            "last_failover": self._last_failover,
-            "failover_count": self._failover_count,
-            "consecutive_errors": self._consecutive_errors,
-            "quality_degraded": self._quality.is_degraded(),
-        }
-
 
 def create_monitor(settings, db) -> LiveMonitor:
     """Create a LiveMonitor instance with configured settings."""

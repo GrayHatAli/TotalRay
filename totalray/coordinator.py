@@ -27,8 +27,6 @@ log = logging.getLogger(__name__)
 # ── restart reasons ──────────────────────────────────────────────────────
 REASON_MEMBERSHIP_CHANGED = "membership_changed"
 REASON_RULES_UPDATED = "rules_updated"
-REASON_FORCED_RECOVERY = "forced_recovery"
-REASON_CLASH_API_FALLBACK = "clash_api_fallback"
 
 
 def _health_check(settings: Any, retries: int = 3,

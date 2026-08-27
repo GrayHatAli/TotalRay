@@ -132,13 +132,12 @@ class Database:
             return self._generation(f"pool_{pool}_generation")
 
     def get_pool_snapshot(self, pool: str, max_n: int = 0,
-                          cursor_enabled: bool = False,
                           retry_backoff_minutes: int = 0) -> dict:
         """Capture a pool's membership generation and candidates atomically.
 
-        When enabled, candidates are ordered oldest-first and recently tested
-        rows can be left for a later round, allowing bounded scans to make
-        steady progress without repeatedly probing the same configs.
+        Candidates are ordered oldest-first. A positive ``retry_backoff_minutes``
+        skips rows tested within that window so bounded scans make steady
+        progress without repeatedly probing the same configs.
         """
         with self._lock:
             generation = self._generation(f"pool_{pool}_generation")
