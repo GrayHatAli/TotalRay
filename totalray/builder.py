@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 
@@ -285,6 +286,45 @@ def set_active_config(settings, tag: str, retries: int = 5, delay: float = 1.0) 
 
 _STALE_ROUTE_SIGNATURE = "append ipv4 loopback route: file exists"
 
+# sing-box's auto_redirect setup adds a `local 127.0.0.1 dev <iface> scope
+# host` route to the MAIN routing table (not `table local`, and not `dev
+# lo`) as part of tearing up TUN redirect routes. Its shutdown path is
+# supposed to remove this again, but under a fast stop+start (or a killed
+# process) it can be left behind. The *next* start then tries to add the
+# exact same route and fails immediately with "file exists" -- a known
+# upstream sing-box bug -- and keeps failing on every subsequent attempt
+# until that specific route is removed, because it never goes away on its
+# own. A previous version of this recovery code deleted
+# `127.0.0.1 dev lo table local`, which does not exist and is not what
+# sing-box actually leaves behind, so it silently no-op'd and this crash
+# loop could persist indefinitely. This regex finds the real leftover
+# route(s) regardless of interface name.
+_STALE_LOOPBACK_RE = re.compile(
+    r"^local 127\.0\.0\.1 dev (\S+) .*scope host", re.MULTILINE)
+
+
+def _clear_stale_loopback_routes() -> list[str]:
+    """Remove any `local 127.0.0.1 dev <iface> scope host` routes sitting
+    in the main routing table (dev != lo). Returns the interfaces cleared,
+    if any. Safe to call unconditionally -- if nothing stale is present
+    this is a no-op.
+    """
+    try:
+        proc = subprocess.run(["ip", "route", "show", "table", "main"],
+                              capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    cleared = []
+    for iface in _STALE_LOOPBACK_RE.findall(proc.stdout or ""):
+        if iface == "lo":
+            continue
+        subprocess.run(
+            ["ip", "route", "del", "local", "127.0.0.1/32", "dev", iface,
+             "table", "main", "scope", "host"],
+            capture_output=True, text=True, timeout=10)
+        cleared.append(iface)
+    return cleared
+
 
 def _start_singbox() -> tuple[bool, str]:
     try:
@@ -316,13 +356,15 @@ def restart_singbox() -> tuple[bool, str]:
     behind, which then makes the *next* startup fail immediately with
     "append ipv4 loopback route: file exists" -- a known upstream sing-box
     bug. Once that happens, `restart` alone crash-loops forever; recovery
-    normally requires a clean stop (letting sing-box's own shutdown path
-    remove the route) or a reboot.
+    normally requires removing the specific leftover route (see
+    _clear_stale_loopback_routes) or a reboot.
 
-    We do the clean stop ourselves, then start. If sing-box still fails
-    with that exact signature (e.g. a route was already left over from
-    before this fix ran), we clear it once and retry, rather than handing
-    back a failure that will just get retried the same broken way.
+    We do the clean stop ourselves, proactively clear any leftover
+    loopback route from a previous unclean shutdown, then start. If
+    sing-box still fails with that exact signature (e.g. it re-added the
+    route itself before crashing on something else first), we clear it
+    once more and retry, rather than handing back a failure that will
+    just get retried the same broken way.
     """
     try:
         subprocess.run(["systemctl", "stop", "sing-box"],
@@ -331,8 +373,11 @@ def restart_singbox() -> tuple[bool, str]:
         return False, f"stop failed: {exc}"
 
     # Give the kernel a moment to fully release the tun interface/routes
-    # before starting again.
+    # before starting again, then proactively remove any loopback route
+    # left behind by a previous unclean shutdown -- this is the actual
+    # fix for the crash-loop, not just a reactive retry.
     time.sleep(1.0)
+    _clear_stale_loopback_routes()
 
     ok, msg = _start_singbox()
     if ok:
@@ -346,9 +391,11 @@ def restart_singbox() -> tuple[bool, str]:
         "restart_singbox: detected known stale-route crash-loop bug "
         "(%s); clearing the loopback route and retrying once",
         _STALE_ROUTE_SIGNATURE)
-    subprocess.run(
-        ["ip", "route", "del", "local", "127.0.0.1", "dev", "lo", "table", "local"],
-        capture_output=True, text=True, timeout=10)
+    cleared = _clear_stale_loopback_routes()
+    if not cleared:
+        log.warning(
+            "restart_singbox: stale-route signature seen in journal but "
+            "no matching route found to clear -- retrying anyway")
     time.sleep(1.0)
 
     ok, msg = _start_singbox()
