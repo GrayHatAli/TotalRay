@@ -283,15 +283,78 @@ def set_active_config(settings, tag: str, retries: int = 5, delay: float = 1.0) 
     return False, last_err
 
 
-def restart_singbox() -> tuple[bool, str]:
+_STALE_ROUTE_SIGNATURE = "append ipv4 loopback route: file exists"
+
+
+def _start_singbox() -> tuple[bool, str]:
     try:
-        proc = subprocess.run(["systemctl", "restart", "sing-box"],
+        proc = subprocess.run(["systemctl", "start", "sing-box"],
                               capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)
     if proc.returncode == 0:
         return True, "restarted"
     return False, (proc.stderr or proc.stdout or "systemctl failed")[-300:]
+
+
+def _recent_singbox_journal(lines: int = 20) -> str:
+    try:
+        proc = subprocess.run(
+            ["journalctl", "-u", "sing-box", "-n", str(lines), "--no-pager"],
+            capture_output=True, text=True, timeout=10)
+        return proc.stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def restart_singbox() -> tuple[bool, str]:
+    """Cleanly stop then start sing-box.
+
+    A plain `systemctl restart` starts the new process before the kernel
+    has finished tearing down the old one's TUN interface and redirect
+    routes. Under repeated restarts this can leave a stale loopback route
+    behind, which then makes the *next* startup fail immediately with
+    "append ipv4 loopback route: file exists" -- a known upstream sing-box
+    bug. Once that happens, `restart` alone crash-loops forever; recovery
+    normally requires a clean stop (letting sing-box's own shutdown path
+    remove the route) or a reboot.
+
+    We do the clean stop ourselves, then start. If sing-box still fails
+    with that exact signature (e.g. a route was already left over from
+    before this fix ran), we clear it once and retry, rather than handing
+    back a failure that will just get retried the same broken way.
+    """
+    try:
+        subprocess.run(["systemctl", "stop", "sing-box"],
+                       capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"stop failed: {exc}"
+
+    # Give the kernel a moment to fully release the tun interface/routes
+    # before starting again.
+    time.sleep(1.0)
+
+    ok, msg = _start_singbox()
+    if ok:
+        return True, msg
+
+    journal = _recent_singbox_journal()
+    if _STALE_ROUTE_SIGNATURE not in journal:
+        return False, msg
+
+    log.warning(
+        "restart_singbox: detected known stale-route crash-loop bug "
+        "(%s); clearing the loopback route and retrying once",
+        _STALE_ROUTE_SIGNATURE)
+    subprocess.run(
+        ["ip", "route", "del", "local", "127.0.0.1", "dev", "lo", "table", "local"],
+        capture_output=True, text=True, timeout=10)
+    time.sleep(1.0)
+
+    ok, msg = _start_singbox()
+    if ok:
+        return True, f"{msg} (recovered from stale-route crash-loop)"
+    return False, msg
 
 
 def rebuild_and_apply(settings, db, force: bool = False) -> tuple[bool, str]:
