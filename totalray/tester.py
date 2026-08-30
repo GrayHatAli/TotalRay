@@ -10,6 +10,8 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from . import net
+
 log = logging.getLogger(__name__)
 
 DEFAULT_CHUNK_SIZE = 96
@@ -31,6 +33,18 @@ def _wait_ports(ports, timeout: float) -> bool:
 
 
 def build_test_config(items: list, base_port: int, dns_server: str) -> dict:
+    # This test instance's own outbound TCP dials are locally-originated
+    # traffic on the same box that runs the main gateway's sing-box, which
+    # transparently redirects local TCP connections back through itself
+    # unless they carry REDIRECT_OUTPUT_MARK (see net.py / auto_redirect
+    # nftables rules -- UDP/ICMP gets an automatic bypass for local
+    # traffic, TCP does not). Without this, every single connectivity
+    # check gets silently double-hopped through the gateway's own tun,
+    # adding latency/CPU and sometimes breaking the proxy handshake
+    # entirely -- which was masquerading as "candidate unreachable".
+    # routing_mark tells sing-box's Go dialer to set the same SO_MARK
+    # Python's bypass_tun()/internet_up() use, so these dials correctly
+    # bypass the gateway's redirect instead of looping back through it.
     inbounds, outbounds, rules = [], [], []
     for idx, item in enumerate(items):
         itag, otag = f"t-{idx}", f"o-{idx}"
@@ -38,9 +52,11 @@ def build_test_config(items: list, base_port: int, dns_server: str) -> dict:
                          "listen": "127.0.0.1", "listen_port": base_port + idx})
         ob = dict(item["outbound"])
         ob["tag"] = otag
+        ob["routing_mark"] = net.REDIRECT_OUTPUT_MARK_INT
         outbounds.append(ob)
         rules.append({"inbound": itag, "action": "route", "outbound": otag})
-    outbounds.append({"type": "direct", "tag": "direct"})
+    outbounds.append({"type": "direct", "tag": "direct",
+                      "routing_mark": net.REDIRECT_OUTPUT_MARK_INT})
     return {
         "log": {"level": "error"},
         "dns": {"servers": [{"type": "udp", "tag": "local",
