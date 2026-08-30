@@ -427,6 +427,42 @@ def _human_bytes(n) -> str:
     return f"{n} PB"
 
 
+# api.ipify.org alone is a single point of failure: a lot of "what's my
+# IP" services get resolution or connect trouble, and this box's DNS path
+# in particular has a history of flaking on individual providers. Try a
+# short list of independent, free, plain-text IP-echo services in order
+# and use whichever answers first, instead of failing the whole status
+# check because one specific provider is having a bad day.
+_EXIT_IP_PROVIDERS = [
+    "https://api.ipify.org",
+    "https://ifconfig.me/ip",
+    "https://icanhazip.com",
+    "https://checkip.amazonaws.com",
+    "https://ipinfo.io/ip",
+]
+
+
+def _fetch_exit_ip(timeout: int = 5) -> tuple[str | None, str | None]:
+    """Try each provider in _EXIT_IP_PROVIDERS in turn; return
+    (ip, None) on the first success, or (None, last_error) if all fail.
+    """
+    last_err = "no providers configured"
+    for url in _EXIT_IP_PROVIDERS:
+        try:
+            probe = subprocess.run(
+                ["curl", "-4", "-fsS", "--max-time", str(timeout), url],
+                capture_output=True, text=True, timeout=timeout + 2, check=True)
+            ip = probe.stdout.strip()
+            # Cheap sanity check -- a provider returning an HTML error page
+            # or similar should not be treated as a valid IP.
+            if ip and ip.replace(".", "").isdigit() and ip.count(".") == 3:
+                return ip, None
+            last_err = f"{url} returned unexpected output: {ip[:50]!r}"
+        except Exception as exc:  # noqa: BLE001
+            last_err = f"{url}: {type(exc).__name__}"
+    return None, last_err
+
+
 def _live_connection_status(settings, db) -> str:
     """Ask sing-box's Clash API which server the 'auto' group actually has
     selected right now, then independently check the apparent public exit
@@ -477,14 +513,10 @@ def _live_connection_status(settings, db) -> str:
         except Exception:  # noqa: BLE001
             server = None
 
-    try:
-        probe = subprocess.run(
-            ["curl", "-4", "-fsS", "--max-time", "5", "https://api.ipify.org"],
-            capture_output=True, text=True, timeout=7, check=True)
-        exit_ip = probe.stdout.strip()
-    except Exception as exc:  # noqa: BLE001
+    exit_ip, exit_err = _fetch_exit_ip()
+    if exit_ip is None:
         return (f"status        : disconnected (selected {name}; exit IP check"
-                f" failed: {type(exc).__name__} - DNS/proxy may be unavailable)")
+                f" failed on all providers: {exit_err} - DNS/proxy may be unavailable)")
 
     server_ip = server
     if server and not server.replace(".", "").isdigit():
