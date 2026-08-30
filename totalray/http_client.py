@@ -26,13 +26,27 @@ def _make_session(retries: int = 2, backoff_factor: float = 0.3) -> requests.Ses
 
 class FailedRequestLogger:
     def __init__(self, path: str):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        handler = logging.handlers.RotatingFileHandler(path, maxBytes=2_000_000, backupCount=3, encoding='utf-8')
-        handler.setFormatter(logging.Formatter('%(message)s'))
         self.logger = logging.getLogger('totalray.failed_requests')
         self.logger.setLevel(logging.INFO)
-        if not self.logger.handlers:
+        if self.logger.handlers:
+            return
+        # The service runs as root, but CLI commands like `totalray status`
+        # are typically run as a regular user (e.g. via sudo-less ssh). Log
+        # rotation creates a fresh file owned by whoever is running at the
+        # time, and on this box that has repeatedly ended up root:root
+        # 644 -- e.g. because /var/lib/totalray lacks the setgid bit -- which
+        # then makes every *other* invocation crash on PermissionError. This
+        # log is diagnostic only, so a permission problem here should never
+        # take down the caller (including plain `totalray status`).
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            handler = logging.handlers.RotatingFileHandler(path, maxBytes=2_000_000, backupCount=3, encoding='utf-8')
+            handler.setFormatter(logging.Formatter('%(message)s'))
             self.logger.addHandler(handler)
+        except OSError as exc:
+            log.warning(
+                "failed-request log unavailable (%s); continuing without "
+                "it -- check ownership/permissions on %s", exc, path)
 
     def record(self, entry: dict[str, Any]) -> None:
         try:
