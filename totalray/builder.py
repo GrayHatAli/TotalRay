@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import pwd
 import re
 import subprocess
 import time
@@ -45,6 +46,29 @@ def _custom_rule(entry: dict) -> dict | None:
         rule["action"] = "route"
         rule["outbound"] = outbound
     return rule
+
+
+def _dnsmasq_uid() -> int | None:
+    """Look up the dnsmasq system user's UID so its own outbound DNS
+    queries (the multi-upstream fallback queries added to
+    dnsmasq/pi-gateway.conf) can be excluded from sing-box's auto_redirect.
+    Without this, dnsmasq's fallback queries to real DNS servers would be
+    transparently redirected right back into sing-box's own (possibly
+    unhealthy) DNS pipeline instead of actually going out -- the exact
+    same failure mode fixed for GroupTester's own connections via
+    routing_mark, just for UDP/53 traffic sourced from dnsmasq instead of
+    a spawned sing-box test process. Looked up by name rather than
+    hardcoded because the uid a distro assigns to a system user varies
+    between installs.
+    """
+    try:
+        return pwd.getpwnam("dnsmasq").pw_uid
+    except KeyError:
+        log.warning(
+            "dnsmasq system user not found; its DNS fallback queries will "
+            "not be excluded from auto_redirect and may loop back through "
+            "sing-box's own DNS instead of reaching real servers directly")
+        return None
 
 
 def build_config(settings, group: list) -> dict:
@@ -106,6 +130,19 @@ def build_config(settings, group: list) -> dict:
         "auto_redirect_input_mark": REDIRECT_INPUT_MARK,
         "auto_redirect_output_mark": REDIRECT_OUTPUT_MARK,
     }
+    dnsmasq_uid = _dnsmasq_uid()
+    if dnsmasq_uid is not None:
+        # dnsmasq is our LAN-facing DNS forwarder (see
+        # dnsmasq/pi-gateway.conf) and now carries its own multi-upstream
+        # fallback list. Its outbound queries are locally-originated UDP/53
+        # traffic, which sing-box's auto_redirect would otherwise capture
+        # and route back into its own DNS pipeline -- exactly the failure
+        # mode this is meant to be a fallback *for*. exclude_uid is
+        # sing-box's native, documented mechanism for excluding a specific
+        # local process's traffic from auto_route/auto_redirect (see
+        # SagerNet/sing-box#3637), so dnsmasq's fallback queries reach the
+        # real internet even if sing-box's primary DNS server is down.
+        tun_in["exclude_uid"] = [dnsmasq_uid]
     if tun["stack"] != "system":
         tun_in["endpoint_independent_nat"] = True
     inbounds = [
