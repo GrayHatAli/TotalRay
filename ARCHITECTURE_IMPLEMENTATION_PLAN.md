@@ -507,16 +507,16 @@ feat: expose coordinator and round health in status
 
 ## تست‌های unit
 
-- [ ] round state concurrent writers
-- [ ] stale generation result
-- [ ] Pool A promotion
-- [ ] Pool B demotion grace
-- [ ] serialized apply
-- [ ] no restart for selector-only switch
-- [ ] restart failure and recovery
-- [ ] empty Pool B
-- [ ] subscription update during Pool A
-- [ ] status with DNS failure
+- [x] round state concurrent writers
+- [x] stale generation result
+- [x] Pool A promotion
+- [x] Pool B demotion grace
+- [x] serialized apply
+- [x] no restart for selector-only switch
+- [x] restart failure and recovery
+- [x] empty Pool B
+- [x] subscription update during Pool A
+- [x] status with DNS failure
 
 ## تست‌های integration
 
@@ -529,20 +529,15 @@ feat: expose coordinator and round health in status
 
 ## rollout روی Pi
 
-1. [ ] اجرای test suite در workspace
-2. [ ] commit کوچک و مستقل
+1. [x] اجرای test suite در workspace (`56 tests passed`)
+2. [x] commit کوچک و مستقل
 3. [ ] push به `origin/main`
-4. [ ] بررسی `git ls-remote origin main`
-5. [ ] stash یا ثبت هر تغییر local روی Pi
-6. [ ] انتقال/دریافت commit روی Pi
-7. [ ] compile در `/opt/totalray`
-8. [ ] توقف کنترل‌شدهٔ `totalray.service`
-9. [ ] نصب application files
-10. [ ] `systemctl daemon-reload` در صورت تغییر unit
-11. [ ] start و health check
-12. [ ] اجرای `totalray status --json`
-13. [ ] بررسی journal حداقل برای یک Pool B round
-14. [ ] ثبت hash فایل‌های source و installed
+4. [ ] اجرای `sudo bash scripts/pre_deploy_check.sh` قبل از upgrade
+5. [ ] اجرای `sudo totalray-update`
+6. [ ] اجرای `sudo bash scripts/pre_deploy_check.sh --post` بعد از upgrade
+7. [ ] اجرای `totalray status --json` و بررسی خروجی
+8. [ ] بررسی journal حداقل برای یک Pool B round
+9. [ ] ثبت hash فایل‌های source و installed
 
 ## معیار rollback
 
@@ -577,6 +572,7 @@ sudo systemctl status totalray sing-box
 6. `feat: prioritize and bound pool A scanning`
 7. `feat: centralize sing-box apply and restart recovery`
 8. `feat: expose coordinator and round health in status`
+9. `test: add Phase 8 acceptance tests and pre-deploy check script`
 
 هر commit باید مستقل compile/test/deploy شود. چند فاز نباید در یک commit بزرگ ادغام شوند.
 
