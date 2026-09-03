@@ -1,59 +1,54 @@
-# پلن معماری چند-اینستنسی sing-box (Multi-Instance Leaf Architecture)
+# Multi-Instance Leaf Architecture Plan (sing-box)
 
-## هدف
+## Goal
 
-جایگزینی مدل «یک اینستنس sing-box با outbound-set متغیر» با مدل «یک اینستنس اصلی ثابت + N اینستنس leaf مستقل»، به‌طوری‌که:
+Replace the current model — "one sing-box instance with a mutable outbound set" — with "one fixed main instance + N independent leaf instances", so that:
 
-- تغییر سرور فعال دیگر نیازی به ری‌استارت اینستنس اصلی نداشته باشد
-- تشخیص packet loss/شکست به‌جای batch رانویی هر چند دقیقه، در حد چند ثانیه انجام شود
-- ری‌استارت (وقتی لازم است) فقط روی یک leaf بدون ترافیک زنده اتفاق بیفتد، نه روی مسیر اصلی
+- Switching the active server no longer requires restarting the main instance
+- Packet-loss / failure detection happens in seconds, not on the current multi-minute batch-test cadence
+- A restart (when actually needed) only ever happens on a leaf instance carrying no live traffic, never on the main path
 
-این سند عمداً مرحله‌ای است؛ هر فاز باید مستقل تست، deploy، و در صورت نیاز rollback شود — با همان انضباطی که در `ARCHITECTURE_IMPLEMENTATION_PLAN.md` برای فازبندی Pool A/B استفاده شده.
+This document is deliberately phased. Each phase must be independently tested, deployed, and (if needed) rolled back — with the same discipline used for the Pool A/B concurrency phasing in `ARCHITECTURE_IMPLEMENTATION_PLAN.md`.
 
-## ارتباط با پلن هم‌زمانی Pool A/B
+## Relationship to the Pool A/B Concurrency Plan
 
-این پلن **مستقل از، اما وابسته به** `ARCHITECTURE_IMPLEMENTATION_PLAN.md` است:
+This plan is **independent of, but dependent on**, `ARCHITECTURE_IMPLEMENTATION_PLAN.md`:
 
-- `ApplyCoordinator` در آن پلن دقیقاً همان جزئی است که در فاز پنج این سند باید متد جدید (leaf replacement) را صدا بزند، نه `rebuild_and_apply()` فعلی را.
-- توصیه می‌شود فازهای یک تا سه‌ی پلن Pool A/B (ایمن‌سازی round status، snapshot/generation، جداسازی worker/committer/coordinator) **قبل از فاز پنج این سند** تکمیل شده باشند؛ وگرنه دو تغییر معماری هم‌زمان روی coordinator یکسان race ایجاد می‌کنند.
-- تا زمانی‌که این ترتیب رعایت نشود، فازهای صفر تا چهار این سند (که مستقل و ایزوله‌اند) بدون مشکل قابل انجام‌اند.
+- `ApplyCoordinator` in that plan is exactly the component that, in Phase 5 of this document, must call a new leaf-replacement method instead of the current `rebuild_and_apply()`.
+- Phases 1–3 of the Pool A/B plan (round-state safety, snapshot/generation, worker/committer/coordinator separation) are recommended to be **complete before Phase 5 of this document** starts; otherwise two concurrent architectural changes will race on the same coordinator.
+- Until that ordering is respected, Phases 0–4 of this document (which are self-contained and isolated) can proceed without issue.
 
-## اصول طراحی (برگرفته از premortem)
+## Design Principles (from the premortem)
 
-۱. **health-monitor باید watchdog مستقل خودش را داشته باشد.** اگر این پروسه هنگ کند، اینستنس اصلی نباید کورکورانه به یک leaf مرده ترافیک بفرستد.
-
-۲. **nftables bypass (routing_mark/exclude_uid) باید از فاز یک، زیر بار پیوسته (نه فقط تست کوتاه) تأیید شود.** چون بعد از این، هر leaf یک پروسهٔ دائمی است، نه یک تست موقت.
-
-۳. **حلقهٔ replacement باید circuit breaker مستقل از circuit breaker فعلی restart داشته باشد.**
-
-۴. **هیسترزیس سریع (برای ثانیه) باید از هیسترزیس کند فعلی (برای دقیقه) کاملاً جدا تعریف شود** تا از flapping جلوگیری شود.
-
-۵. **جایگزینی leaf باید readiness-gated باشد** — یعنی leaf جدید فقط بعد از یک health probe موفق، وارد rotation شود، نه بلافاصله بعد از bind شدن پورت.
-
-۶. **هیچ فازی نباید تولید را لمس کند مگر با موازی (shadow) اجرا شده و مقایسه شده باشد.**
+1. **The health monitor must have its own independent watchdog.** If that process hangs, the main instance must not blindly keep routing traffic to a dead leaf.
+2. **nftables bypass (routing_mark/exclude_uid) must be validated under sustained load, not just a short test, starting in Phase 1.** After this change, every leaf is a permanent process, not a transient test.
+3. **The replacement loop needs its own circuit breaker, independent of the existing restart circuit breaker.**
+4. **The fast hysteresis (seconds-scale) must be fully decoupled from the current slow hysteresis (minutes-scale)** to avoid flapping.
+5. **Leaf replacement must be readiness-gated** — a new leaf only enters rotation after a successful health probe, not immediately after its port binds.
+6. **No phase may touch production unless it has first run in parallel (shadow mode) and been compared against the baseline.**
 
 ---
 
-# فاز صفر: Baseline و بودجهٔ منابع
+# Phase 0: Baseline and Resource Budget
 
-## هدف
+## Goal
 
-قبل از اضافه کردن N پروسهٔ دائمی، بفهمیم پای واقعاً چقدر ظرفیت دارد.
+Before adding N permanent processes, establish what the Pi can actually sustain.
 
-## کارها
+## Tasks
 
-- [ ] اندازه‌گیری CPU/RAM حین یک اینستنس فعلی (idle و زیر بار)
-- [ ] بنچمارک: N=2 و N=3 اینستنس leaf شبیه‌سازی‌شده به مدت ۲۴ ساعت، ثبت CPU/RAM/bandwidth baseline
-- [ ] اندازه‌گیری هزینهٔ نگه‌داشتن تونل‌های QUIC-based (Hysteria2/TUIC) زنده به‌صورت idle
-- [ ] ثبت پهنای‌باند مصرفی health-probeهای پیشنهادی (فرضی) روی آپلینک DSL فعلی
-- [ ] تعیین N نهایی (پیش‌فرض پیشنهادی: ۲ برای شروع، نه ۳)
+- [ ] Measure CPU/RAM for the current single instance (idle and under load)
+- [ ] Benchmark N=2 and N=3 simulated leaf instances over 24 hours; record CPU/RAM/bandwidth baseline
+- [ ] Measure the cost of keeping QUIC-based tunnels (Hysteria2/TUIC) alive at idle
+- [ ] Record the bandwidth cost of the proposed (hypothetical) health probes on the current DSL uplink
+- [ ] Decide the final N (proposed default: start with 2, not 3)
 
-## معیار پذیرش
+## Acceptance Criteria
 
-- عدد مشخصی برای «سقف N که پای تحملش را دارد» ثبت شود.
-- هیچ تغییری در کد production داده نشود.
+- A concrete number for "the ceiling N the Pi can tolerate" is recorded.
+- No production code is changed.
 
-## Commit پیشنهادی
+## Suggested Commit
 
 ```text
 chore: record Pi resource baseline for multi-instance leaf design
@@ -61,27 +56,27 @@ chore: record Pi resource baseline for multi-instance leaf design
 
 ---
 
-# فاز یک: Leaf process — پروتوتایپ ایزوله
+# Phase 1: Leaf Process — Isolated Prototype
 
-## هدف
+## Goal
 
-ساخت و تست یک اینستنس leaf مستقل، کاملاً جدا از مسیر تولید، بدون هیچ اتصال به main یا Pool B واقعی.
+Build and test a standalone leaf instance, fully separate from the production path, with no connection to main or the real Pool B.
 
-## کارها
+## Tasks
 
-- [ ] ماژول جدید `totalray/leaf.py`: build کانفیگ leaf (یک inbound SOCKS روی پورت ثابت + یک outbound با exclude_uid/routing_mark دائمی)
-- [ ] الگوی exclude_uid را از `_dnsmasq_uid()` (که قبلاً برای DNS fallback کار کرد) برای uid مخصوص leaf تکرار کن
-- [ ] تست دستی: leaf را ۲۴ ساعت روشن نگه دار، بررسی کن که هیچ double-hop یا CPU spike از auto_redirect اتفاق نیفتد
-- [ ] unit test: `build_leaf_config` خروجی معتبر sing-box تولید کند (`sing-box check`)
-- [ ] integration test: leaf روشن شود، از طریق SOCKS محلی‌اش به اینترنت وصل شود، و ترافیکش وارد nftables auto_redirect اصلی نشود (بررسی با شمارندهٔ nftables یا لاگ)
+- [ ] New module `totalray/leaf.py`: build the leaf config (one SOCKS inbound on a fixed port + one outbound with a permanent exclude_uid/routing_mark)
+- [ ] Reuse the `_dnsmasq_uid()` pattern (already proven for the DNS fallback feature) for a dedicated leaf uid
+- [ ] Manual test: run a leaf continuously for 24 hours; verify no double-hop or CPU spike occurs via the main auto_redirect
+- [ ] Unit test: `build_leaf_config` produces a valid sing-box config (`sing-box check`)
+- [ ] Integration test: leaf starts, connects out via its local SOCKS port, and its traffic never re-enters the main nftables auto_redirect (verify via nftables counters or logs)
 
-## معیار پذیرش
+## Acceptance Criteria
 
-- بعد از ۲۴ ساعت اجرای پیوسته، هیچ افزایش غیرعادی CPU یا route جدید در main دیده نشود.
-- تست خودکار bypass بودن leaf (نه main) پاس شود.
-- هیچ تغییری در `/etc/sing-box/config.json` تولید داده نشود.
+- After 24 hours of continuous run, no abnormal CPU increase or new routes appear on main.
+- The automated bypass test (leaf, not main) passes.
+- `/etc/sing-box/config.json` for main is not touched at all.
 
-## Commit پیشنهادی
+## Suggested Commit
 
 ```text
 feat: add isolated leaf sing-box process prototype
@@ -89,26 +84,26 @@ feat: add isolated leaf sing-box process prototype
 
 ---
 
-# فاز دو: Main instance — selector روی loopback (parity test)
+# Phase 2: Main Instance — Selector Over Loopback (Parity Test)
 
-## هدف
+## Goal
 
-اثبات این‌که سوییچ Clash API بین اعضای local loopback، همان رفتار پایدار سوییچ فعلی (بین remote outboundها) را دارد — قبل از این‌که به چند leaf متکی شویم.
+Prove that a Clash API switch between loopback members behaves exactly like the current stable switch between remote outbounds — before depending on multiple leaves.
 
-## کارها
+## Tasks
 
-- [ ] یک outbound موقت در main اضافه کن که به یک پورت لوپ‌بک ثابت (که یک leaf تک رویش گوش می‌دهد) اشاره می‌کند
-- [ ] با یک leaf واحد، چند بار سوییچ انجام بده و بررسی کن `interrupt_exist_connections: false` هنوز صادق است (کانکشن‌های زنده قطع نمی‌شوند)
-- [ ] اندازه‌گیری round-trip اضافه‌شده از این هاپ اضافی (main → loopback → leaf → اینترنت) در مقابل حالت فعلی (main → مستقیم اینترنت)
-- [ ] این فاز را کاملاً موازی (shadow) با مسیر تولید فعلی اجرا کن — main تولید همچنان دست‌نخورده بماند
+- [ ] Add a temporary outbound on main pointing to a fixed loopback port (served by a single leaf)
+- [ ] Switch back and forth several times with a single leaf and confirm `interrupt_exist_connections: false` still holds (live connections are not dropped)
+- [ ] Measure the added round-trip from this extra hop (main → loopback → leaf → internet) versus the current direct path
+- [ ] Run this phase entirely in shadow mode alongside the current production path — production main stays untouched
 
-## معیار پذیرش
+## Acceptance Criteria
 
-- سوییچ بین یک outbound remote و یک outbound loopback هیچ قطعی کانکشنی ایجاد نکند.
-- افزایش latency ناشی از هاپ اضافی داخلی، قابل قبول باشد (پیشنهاد: زیر ۵ میلی‌ثانیه، چون فقط loopback است)
-- rollback ساده باشد: صرفاً حذف outbound موقت
+- Switching between a remote outbound and a loopback outbound causes zero connection drops.
+- The added latency from the internal hop is acceptable (proposed: under 5ms, since it's loopback-only).
+- Rollback is trivial: just remove the temporary outbound.
 
-## Commit پیشنهادی
+## Suggested Commit
 
 ```text
 feat: prototype main selector over loopback leaf (shadow only)
@@ -116,29 +111,29 @@ feat: prototype main selector over loopback leaf (shadow only)
 
 ---
 
-# فاز سه: Health monitor سریع + flap guard + watchdog
+# Phase 3: Fast Health Monitor + Flap Guard + Watchdog
 
-## هدف
+## Goal
 
-جایگزین کردن پراب batch کند فعلی با یک ناظر سریع، مستقل، و خودمحافظ برای leafها.
+Replace the current slow batch probe with a fast, independent, self-protecting monitor for the leaves.
 
-## کارها
+## Tasks
 
-- [ ] ماژول جدید `totalray/leaf_monitor.py`، جدا از `live_monitor.py` فعلی
-- [ ] پراب هر leaf هر ۳ تا ۵ ثانیه (Clash API `/proxies/{name}/delay` یا TCP connect سبک)
-- [ ] هیسترزیس مستقل: مثلاً ۲ شکست پیاپی در بازهٔ ۱۵ ثانیه (نه ۲ دقیقه)
-- [ ] flap guard: حداقل فاصلهٔ زمانی بین دو سوییچ متوالی (مثلاً cooldown ۳۰ ثانیه‌ای) برای جلوگیری از نوسان سریع
-- [ ] self-watchdog: heartbeat file که یک ناظر بیرونی (systemd watchdog یا یک thread جدا در `main.py`) چک می‌کند؛ اگر heartbeat قدیمی شد، leaf_monitor ری‌استارت شود
-- [ ] unit test: شبیه‌سازی packet loss متناوب (نه کامل) و بررسی رفتار hysteresis/flap guard
-- [ ] unit test: قطع شدن خود leaf_monitor و تأیید این‌که watchdog تشخیص می‌دهد
+- [ ] New module `totalray/leaf_monitor.py`, separate from the current `live_monitor.py`
+- [ ] Probe each leaf every 3–5 seconds (Clash API `/proxies/{name}/delay` or a lightweight TCP connect)
+- [ ] Independent hysteresis: e.g. 2 consecutive failures within a 15-second window (not 2 minutes)
+- [ ] Flap guard: a minimum cooldown between consecutive switches (e.g. 30 seconds) to prevent rapid oscillation
+- [ ] Self-watchdog: a heartbeat file checked by an external watcher (systemd watchdog or a separate thread in `main.py`); if the heartbeat goes stale, `leaf_monitor` gets restarted
+- [ ] Unit test: simulate intermittent (not total) packet loss and verify hysteresis/flap-guard behavior
+- [ ] Unit test: kill `leaf_monitor` itself and confirm the watchdog detects it
 
-## معیار پذیرش
+## Acceptance Criteria
 
-- شکست کامل leaf در کمتر از ۱۰ ثانیه شناسایی و failover شود.
-- یک leaf با کیفیت نوسانی/مرزی باعث بیش از ۱ سوییچ در ۳۰ ثانیه نشود.
-- قطع شدن خود leaf_monitor حداکثر ظرف N ثانیه شناسایی و لاگ شود.
+- A total leaf failure is detected and failed over in under 10 seconds.
+- A leaf with borderline/oscillating quality does not trigger more than 1 switch per 30 seconds.
+- `leaf_monitor` dying is detected and logged within N seconds.
 
-## Commit پیشنهادی
+## Suggested Commit
 
 ```text
 feat: add fast leaf health monitor with flap guard and watchdog
@@ -146,29 +141,29 @@ feat: add fast leaf health monitor with flap guard and watchdog
 
 ---
 
-# فاز چهار: Leaf lifecycle orchestrator (replacement + circuit breaker)
+# Phase 4: Leaf Lifecycle Orchestrator (Replacement + Circuit Breaker)
 
-## هدف
+## Goal
 
-مدیریت جایگزینی خودکار leaf خراب با کاندید بعدی، بدون race condition و بدون چرخهٔ بی‌نهایت.
+Manage automatic replacement of a failed leaf with the next candidate, without race conditions or an infinite loop.
 
-## کارها
+## Tasks
 
-- [ ] ماژول جدید `totalray/leaf_orchestrator.py`: مسئول start/stop/replace هر leaf روی پورت ثابتش
-- [ ] پروتکل handoff امن: leaf جدید فقط بعد از یک health probe موفق (نه صرفاً bind شدن پورت) وارد rotation می‌شود
-- [ ] در حین جایگزینی، اگر main در حال حاضر به همان پورت متصل است، اول به یک leaf دیگر (اگر سالم است) سوییچ کن، بعد leaf را ری‌استارت کن (هیچ‌وقت main را به پورتی که در حال ری‌استارت است نگه ندار)
-- [ ] circuit breaker مستقل: اگر یک leaf بیش از N بار در بازهٔ M دقیقه جایگزین شود و بازهم fail کند، آن slot را تا بررسی دستی متوقف کن و در دیتابیس `removed` علامت بزن
-- [ ] یکپارچه‌سازی با soft-delete موجود در `db.py` (بدون تغییر منطق فعلی امتیازدهی)
-- [ ] test: race condition — همزمان health probe و replacement روی یک پورت
-- [ ] test: circuit breaker trip بعد از N شکست پیاپی جایگزینی
+- [ ] New module `totalray/leaf_orchestrator.py`: owns start/stop/replace for each leaf on its fixed port
+- [ ] Safe handoff protocol: a new leaf only enters rotation after a successful health probe, not merely after its port binds
+- [ ] During replacement, if main currently points at that port, first switch to another healthy leaf (if one exists), then restart the leaf — main must never be left pointing at a port mid-restart
+- [ ] Independent circuit breaker: if a leaf is replaced more than N times within M minutes and keeps failing, stop that slot pending manual review and mark it `removed` in the database
+- [ ] Integrate with the existing soft-delete logic in `db.py` (no change to current scoring logic)
+- [ ] Test: race condition — a health probe and a replacement happening simultaneously on the same port
+- [ ] Test: circuit breaker trips after N consecutive replacement failures
 
-## معیار پذیرش
+## Acceptance Criteria
 
-- هیچ پنجرهٔ زمانی‌ای وجود نداشته باشد که main به یک پورت bind-نشده اشاره کند.
-- circuit breaker این حلقه، مستقل از circuit breaker ری‌استارت فعلی trip شود و جدا لاگ شود.
-- تست race condition به‌صورت خودکار و تکرارپذیر پاس شود.
+- There is no time window in which main points at an unbound port.
+- This loop's circuit breaker trips independently of, and is logged separately from, the existing restart circuit breaker.
+- The race-condition test passes automatically and reproducibly.
 
-## Commit پیشنهادی
+## Suggested Commit
 
 ```text
 feat: add leaf replacement orchestrator with independent circuit breaker
@@ -176,29 +171,29 @@ feat: add leaf replacement orchestrator with independent circuit breaker
 
 ---
 
-# فاز پنج: یکپارچه‌سازی با خط لولهٔ Pool A/B
+# Phase 5: Integration with the Pool A/B Pipeline
 
-## هدف
+## Goal
 
-وصل کردن خروجی Pool B (کاندیدهای verified) به صف «بهترین کاندید بعدی» leaf orchestrator، به‌جای diff کردن کل outbound-set.
+Wire Pool B's verified output into the leaf orchestrator's "next best candidate" queue, instead of diffing the entire outbound set.
 
-## پیش‌نیاز
+## Prerequisite
 
-تکمیل فازهای یک تا سه‌ی `ARCHITECTURE_IMPLEMENTATION_PLAN.md` (به دلیل توضیح داده‌شده در بخش «ارتباط با پلن هم‌زمانی Pool A/B»).
+Phases 1–3 of `ARCHITECTURE_IMPLEMENTATION_PLAN.md` must be complete (see "Relationship to the Pool A/B Concurrency Plan" above).
 
-## کارها
+## Tasks
 
-- [ ] `ApplyCoordinator` به‌جای `rebuild_and_apply()` کامل، متد جدید `leaf_orchestrator.request_replacement(slot, candidate)` را صدا بزند
-- [ ] معیار انتخاب کاندید بعدی: بالاترین امتیاز Pool B که در حال حاضر به هیچ leaf فعالی assign نشده
-- [ ] حذف مسیر قدیمی diff-تگ/restart کامل برای این حالت خاص (نگه‌داشتنش فقط برای موارد نادر مثل تغییر rule-set یا آپدیت main)
-- [ ] test: سناریوی end-to-end — یک کانفیگ در Pool A تست می‌شود، به Pool B می‌رود، توسط orchestrator به یک leaf آزاد assign می‌شود، health probe می‌شود، و در نهایت main بهش سوییچ می‌کند
+- [ ] `ApplyCoordinator` calls a new `leaf_orchestrator.request_replacement(slot, candidate)` method instead of the full `rebuild_and_apply()`
+- [ ] Candidate-selection rule: the highest-scoring Pool B entry not currently assigned to any active leaf
+- [ ] Remove the old tag-diff/full-restart path for this specific case (keep it only for rare cases like rule-set changes or a main upgrade)
+- [ ] Test: end-to-end scenario — a config is tested in Pool A, promoted to Pool B, assigned by the orchestrator to a free leaf, health-probed, and finally selected by main
 
-## معیار پذیرش
+## Acceptance Criteria
 
-- یک کانفیگ جدید سالم در Pool B، بدون هیچ ری‌استارت main، وارد rotation شود.
-- مسیر قدیمی restart-کامل فقط برای تغییرات واقعی main (rule-set، نسخهٔ sing-box) باقی بماند.
+- A new healthy Pool B config enters rotation with zero restarts of main.
+- The old full-restart path remains only for genuine main-level changes (rule-set, sing-box version).
 
-## Commit پیشنهادی
+## Suggested Commit
 
 ```text
 feat: wire pool B promotion into leaf replacement queue
@@ -206,16 +201,16 @@ feat: wire pool B promotion into leaf replacement queue
 
 ---
 
-# فاز شش: Observability
+# Phase 6: Observability
 
-## هدف
+## Goal
 
-گسترش `totalray status` برای نمایش وضعیت هر leaf، مشابه سبک فاز observability پلن دیگر.
+Extend `totalray status` to show per-leaf state, matching the observability-phase style used in the other plan.
 
-## کارها
+## Tasks
 
-- [ ] هر رویداد leaf_monitor/orchestrator با یک `leaf_slot_id` مشترک لاگ شود تا correlate کردن راحت باشد
-- [ ] افزودن جدول به خروجی status:
+- [ ] Every `leaf_monitor`/orchestrator event is logged with a shared `leaf_slot_id` for easy correlation
+- [ ] Add a table to the status output:
 
 ```text
 Leaf 1 (active):  slot=30001  server=... delay=142ms   since=14:32:07
@@ -223,14 +218,14 @@ Leaf 2 (standby): slot=30002  server=... delay=198ms   since=14:20:11
 Leaf 3 (replace): slot=30003  status=warming up...
 ```
 
-- [ ] نمایش تعداد سوییچ‌ها و trip‌های circuit breaker در ۲۴ ساعت اخیر
-- [ ] خروجی `--json` هم شامل این فیلدها شود
+- [ ] Show switch counts and circuit-breaker trips over the last 24 hours
+- [ ] Include these fields in the `--json` output as well
 
-## معیار پذیرش
+## Acceptance Criteria
 
-- از روی یک incident، بتوان ظرف چند ثانیه فهمید کدام leaf چه موقع و چرا سوییچ کرده.
+- From an incident, one can determine within seconds which leaf switched, when, and why.
 
-## Commit پیشنهادی
+## Suggested Commit
 
 ```text
 feat: expose leaf pool state in totalray status
@@ -238,26 +233,26 @@ feat: expose leaf pool state in totalray status
 
 ---
 
-# فاز هفت: rollout مرحله‌ای روی Pi
+# Phase 7: Staged Rollout on the Pi
 
-## کارها
+## Tasks
 
-1. [ ] اجرای shadow mode: leafها روشن باشند و مانیتور شوند، ولی main همچنان از مسیر قدیمی استفاده کند (مقایسهٔ delay/uptime بدون ریسک)
-2. [ ] مقایسهٔ حداقل ۴۸ ساعت داده‌ی shadow با رفتار فعلی
-3. [ ] cutover با N=2 (فعال + آماده)، مسیر قدیمی به‌عنوان fallback دستی نگه داشته شود
-4. [ ] مانیتور حداقل یک هفته: تعداد سوییچ، circuit breaker trips، CPU/RAM
-5. [ ] در صورت پایداری، افزایش به N=3
-6. [ ] فقط بعد از پایداری کامل N=3، مسیر قدیمی restart-کامل به‌عنوان fallback حذف شود (نه زودتر)
+1. [ ] Run in shadow mode: leaves are live and monitored, but main still uses the old path (compare delay/uptime with zero risk)
+2. [ ] Compare at least 48 hours of shadow data against current behavior
+3. [ ] Cut over with N=2 (active + standby); keep the old path as a manual fallback
+4. [ ] Monitor for at least one week: switch count, circuit-breaker trips, CPU/RAM
+5. [ ] If stable, increase to N=3
+6. [ ] Only after N=3 is fully stable, remove the old full-restart path as a fallback (not before)
 
-## معیار rollback
+## Rollback Criteria
 
-اگر هرکدام از این‌ها رخ داد، فوراً به مسیر قدیمی برگرد:
+Revert to the old path immediately if any of these occur:
 
-- بیش از ۱ trip از circuit breaker جدید در ساعت
-- CPU sustained بالای آستانهٔ تعیین‌شده در فاز صفر
-- هر گزارش قطعی کاربر که با زمان یک leaf switch هم‌زمان است
+- More than 1 trip of the new circuit breaker per hour
+- Sustained CPU above the threshold set in Phase 0
+- Any user-reported outage that coincides with a leaf switch
 
-## Commit پیشنهادی
+## Suggested Commit
 
 ```text
 chore: staged rollout plan for multi-instance leaf architecture
@@ -265,13 +260,13 @@ chore: staged rollout plan for multi-instance leaf architecture
 
 ---
 
-# تصمیم معماری
+# Architecture Decision
 
-معماری leaf چندگانه تأیید می‌شود، با این پیش‌شرط‌های صریح برگرفته از premortem:
+The multi-leaf architecture is approved, with these explicit prerequisites drawn from the premortem:
 
-- health-monitor باید watchdog خودش را داشته باشد (فاز سه)
-- nftables bypass باید زیر بار پیوسته تست شود، نه فقط تست کوتاه (فاز یک)
-- حلقهٔ replacement باید circuit breaker مستقل داشته باشد (فاز چهار)
-- تا قبل از تکمیل فاز سه‌ی `ARCHITECTURE_IMPLEMENTATION_PLAN.md`، فاز پنج این سند شروع نشود
+- The health monitor must have its own watchdog (Phase 3)
+- nftables bypass must be tested under sustained load, not just a short test (Phase 1)
+- The replacement loop must have its own independent circuit breaker (Phase 4)
+- Phase 5 of this document must not start before Phase 3 of `ARCHITECTURE_IMPLEMENTATION_PLAN.md` is complete
 
-هیچ فازی نباید مسیر production فعلی را مستقیماً جایگزین کند؛ گذار باید از طریق shadow mode و rollout تدریجی (فاز هفت) انجام شود.
+No phase may replace the current production path directly; the transition must go through shadow mode and the staged rollout (Phase 7).
