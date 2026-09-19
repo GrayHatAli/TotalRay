@@ -441,6 +441,78 @@ def restart_singbox() -> tuple[bool, str]:
     return False, msg
 
 
+def _singbox_is_active() -> bool:
+    try:
+        proc = subprocess.run(["systemctl", "is-active", "--quiet", "sing-box"],
+                              timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _clash_api_alive(settings, timeout: float = 1.5) -> bool:
+    clash = settings["clash_api"]
+    host = clash["listen"]
+    secret = clash.get("secret") or ""
+    headers = {"Authorization": f"Bearer {secret}"} if secret else {}
+    try:
+        resp = requests.get(f"http://{host}/version", headers=headers, timeout=timeout)
+    except (requests.RequestException, OSError):
+        return False
+    return resp.status_code == 200
+
+
+def _wait_for_reload(settings, attempts: int = 8, delay: float = 0.5) -> bool:
+    """Poll until the freshly-reloaded instance is up and its Clash API
+    is answering, or give up after `attempts` tries."""
+    for _ in range(attempts):
+        time.sleep(delay)
+        if _singbox_is_active() and _clash_api_alive(settings):
+            return True
+    return False
+
+
+def reload_singbox(settings) -> tuple[bool, str]:
+    """Ask a running sing-box to pick up the new config via SIGHUP
+    instead of a full stop/start cycle.
+
+    sing-box's own CLI already handles SIGHUP natively: on receipt it
+    re-validates the config on disk, closes the current in-process
+    instance, and starts a new one in its place -- all inside the same
+    OS process, so systemd never observes the unit go inactive and no
+    new process is spawned. Combined with the fact that write_and_check()
+    already validated this exact config before we get here, a broken
+    config can never tear down a working tunnel: sing-box's own internal
+    check() runs again before it will swap anything.
+
+    This is *not* a guarantee against the known stale-loopback-route bug
+    (see restart_singbox) -- TUN is still torn down and rebuilt inside
+    that same process -- so we confirm the reload actually landed by
+    polling the Clash API, and fall back to the proven stop/start path
+    (with its existing stale-route detection and recovery) if the
+    reload doesn't visibly succeed within a few seconds, or if sing-box
+    wasn't running to begin with.
+    """
+    if not _singbox_is_active():
+        log.info("reload_singbox: service not active; starting instead of reloading")
+        return _start_singbox()
+
+    try:
+        subprocess.run(["systemctl", "kill", "-s", "HUP", "sing-box"],
+                       capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("reload_singbox: failed to send SIGHUP (%s); "
+                    "falling back to full restart", exc)
+        return restart_singbox()
+
+    if _wait_for_reload(settings):
+        return True, "reloaded via SIGHUP"
+
+    log.warning("reload_singbox: no confirmation of reload within timeout; "
+                "falling back to full restart")
+    return restart_singbox()
+
+
 def rebuild_and_apply(settings, db, force: bool = False) -> tuple[bool, str]:
     """Apply the current pool-B state to sing-box.
 
@@ -473,7 +545,7 @@ def rebuild_and_apply(settings, db, force: bool = False) -> tuple[bool, str]:
     ok, msg = write_and_check(settings, config)
     if not ok:
         return False, msg
-    ok, msg = restart_singbox()
+    ok, msg = reload_singbox(settings)
     if not ok:
         return False, f"config written but restart failed: {msg}"
     _save_last_tags(settings, new_tags)
