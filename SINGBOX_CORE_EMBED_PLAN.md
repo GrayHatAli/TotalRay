@@ -62,29 +62,32 @@ isolated from production.
 
 ## Tasks
 
-- [ ] New `cmd/singbox-core` Go module. Vendor or directly depend on
+- [x] New `cmd/singbox-core` Go module. Vendor or directly depend on
       `github.com/sagernet/sing-box` (the same version currently pinned,
       1.13.14, to avoid an unrelated protocol/behavior change alongside this
       one).
-- [ ] Study `alireza0/s-ui`'s `core/main.go`, `core/box.go`, and
+- [x] Study `alireza0/s-ui`'s `core/main.go`, `core/box.go`, and
       `core/endpoint.go` (GPL-3.0, reuse permitted) as the reference
       implementation for `Core.Start`, `Core.Stop`, `Core.AddOutbound`,
       `Core.RemoveOutbound`, and the locking discipline around them
       (`service.lifecycleMu` outer, `Core.mu` inner) -- do not reinvent the
       locking from scratch.
-- [ ] Control protocol: a Unix domain socket at
+- [x] Control protocol: a Unix domain socket at
       `/run/totalray/singbox-core.sock`, newline-delimited JSON requests:
       `{"cmd":"start","config":...}`, `{"cmd":"stop"}`,
       `{"cmd":"add_outbound","config":...}`,
       `{"cmd":"remove_outbound","tag":...}`, `{"cmd":"is_running"}`.
-- [ ] Unit tests (Go): each control command against a throwaway config,
+- [x] Unit tests (Go): each control command against a throwaway config,
       asserting the live `Box`'s outbound set actually changed with no
       process restart.
-- [ ] Manual test: start with a real config, `AddOutbound` a second real
+- [x] Manual test: start with a real config, `AddOutbound` a second real
       server, confirm via Clash API that both tags are selectable, confirm
       via `/connections` that existing connections through the first
-      outbound are undisturbed by the `AddOutbound` call.
-- [ ] Manual test: `RemoveOutbound` a tag that is *not* currently selected;
+      outbound are undisturbed by the `AddOutbound` call. **Partial result --
+      see "Finding" note below:** the add itself is confirmed disruption-free,
+      but the added tag is *not* selectable on a pre-existing selector group
+      (Clash API `select` returns 400). Full writeup in `cmd/singbox-core/README.md`.
+- [x] Manual test: `RemoveOutbound` a tag that is *not* currently selected;
       confirm zero impact on live connections through the selected one.
 
 ## Acceptance Criteria
@@ -95,6 +98,17 @@ isolated from production.
   on the active one (verified via `/connections` count, matching the method
   used to test the SIGHUP reload).
 - Runs standalone; nothing in `totalray/builder.py` calls it yet.
+
+## Finding: a group's member list is fixed at its own Start(), not live
+
+`selector`/`urltest` resolve their `outbounds` list exactly once, when the
+group itself starts, from the static list in its config. `add_outbound`
+registers a real, dialable, hot-swappable outbound on the daemon's manager --
+but it does **not** retroactively become selectable on a pre-existing group;
+`PUT /proxies/{group}` for a dynamically-added tag returns `400`. Confirmed
+live, not just read from source: see `cmd/singbox-core/README.md` for the
+full manual-test transcript. This changes Phase 3's task list -- see the note
+there.
 
 ## Suggested Commit
 
@@ -149,6 +163,27 @@ feat: run sing-box via the embedded Go daemon instead of the stock CLI
 Always keep more than one verified Pool B server registered as a live,
 selectable outbound -- without any of the leaf plan's per-process machinery.
 
+## Note: `select` alone will not work as originally assumed (found in Phase 1)
+
+Phase 1 confirmed live that a `selector`/`urltest` group only resolves its
+member list once, at its own start -- an `add_outbound`'d tag is real and
+dialable but not selectable on a pre-existing group (Clash API `select`
+returns 400 for it). Promoting a standby therefore can't be a plain `select`
+call unless the group's member list already included every standby tag from
+the start (e.g. always register N=3 tags upfront, even before Pool A has
+verified candidates to fill all of them with real servers -- filling a slot
+would then just be recreating *that one outbound* under its existing tag,
+which is a normal `add_outbound`/replace and leaves the group untouched).
+The alternative -- `remove_outbound` the group tag itself and `add_outbound`
+a new group under the same tag with the updated member list -- also stays
+restart-free (route rules reference the group's tag, not its members) but is
+one extra Create/Remove pair per promotion. Pick one of these two approaches
+before starting the tasks below; the task list as written assumes `select`
+works on any registered tag, which Phase 1 showed is false for a group
+outbound (it does work standalone via `/proxies/{tag}/delay` etc., and
+would work for `select` too if that tag itself were the route target instead
+of a group -- also worth weighing as a third option).
+
 ## Tasks
 
 - [ ] Decide N (proposed: 2 standbys + 1 active = 3 outbounds registered at
@@ -157,10 +192,15 @@ selectable outbound -- without any of the leaf plan's per-process machinery.
 - [ ] `builder.py`: replace the tag-diff-then-full-rebuild logic with calls to
       the daemon's socket API -- `add_outbound` for a newly promoted Pool B
       candidate, `remove_outbound` for one being retired, `select` via the
-      existing Clash API call for switching which one is active.
+      existing Clash API call for switching which one is active. (See the
+      note above -- confirm which of the two approaches this actually uses
+      before implementing.)
 - [ ] Never `remove_outbound` the tag that is currently selected. If the
       active tag needs to go, `select` to a healthy standby first, then
-      remove it.
+      remove it. (Sing-box's own `OutboundManager.Remove` already refuses to
+      remove any tag a group statically depends on, selected or not --
+      confirmed in Phase 1 -- so this is partly a existing safety net, not
+      purely something we must enforce ourselves.)
 - [ ] Unit tests: churn scenarios (add while 3 are already registered, remove
       the active one, remove a standby) against a mock of the control socket.
 - [ ] Integration test: full pipeline test -- Pool A promotes a candidate,
