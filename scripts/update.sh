@@ -27,13 +27,34 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "== Downloading latest TotalRay from main..."
-curl -fsSL --retry 3 \
-  "${REPO_BASE%/}/archive/refs/heads/main.tar.gz" \
-  -o "$TMP_DIR/totalray.tar.gz"
-tar -xzf "$TMP_DIR/totalray.tar.gz" -C "$TMP_DIR"
-SRC_DIR="$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d -name 'TotalRay-*' -print -quit)"
-[ -n "$SRC_DIR" ] || { echo "Could not unpack the TotalRay source." >&2; exit 1; }
+# Offline mode (GitHub unreachable from the Pi): point TOTALRAY_SRC_DIR at an
+# already-extracted source tree, and TOTALRAY_PREBUILT_CORE at a singbox-core
+# binary cross-compiled elsewhere (the Pi has no Go toolchain).
+if [ -n "${TOTALRAY_SRC_DIR:-}" ]; then
+  echo "== Using local source tree $TOTALRAY_SRC_DIR"
+  SRC_DIR="$TOTALRAY_SRC_DIR"
+  [ -d "$SRC_DIR/totalray" ] || { echo "$SRC_DIR is not a TotalRay tree." >&2; exit 1; }
+else
+  echo "== Downloading latest TotalRay from main..."
+  curl -fsSL --retry 3 \
+    "${REPO_BASE%/}/archive/refs/heads/main.tar.gz" \
+    -o "$TMP_DIR/totalray.tar.gz"
+  tar -xzf "$TMP_DIR/totalray.tar.gz" -C "$TMP_DIR"
+  SRC_DIR="$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d -name 'TotalRay-*' -print -quit)"
+  [ -n "$SRC_DIR" ] || { echo "Could not unpack the TotalRay source." >&2; exit 1; }
+fi
+
+# Check every prerequisite BEFORE stopping any service, so a missing
+# toolchain can never cause an avoidable outage.
+PREBUILT_CORE="${TOTALRAY_PREBUILT_CORE:-}"
+if [ -n "$PREBUILT_CORE" ]; then
+  [ -x "$PREBUILT_CORE" ] || { echo "Prebuilt core $PREBUILT_CORE is not executable." >&2; exit 1; }
+else
+  command -v go >/dev/null 2>&1 || {
+    echo "Go is required to build the embedded sing-box core (or set TOTALRAY_PREBUILT_CORE)." >&2
+    exit 1
+  }
+fi
 
 [ -d "$INSTALL_DIR/venv" ] || {
   echo "Missing $INSTALL_DIR/venv; run scripts/install.sh first." >&2
@@ -61,14 +82,14 @@ cp -a "$SRC_DIR/cmd/singbox-core" "$INSTALL_DIR/cmd/singbox-core"
 # Keep the existing configuration, database, rule-sets, and sing-box files.
 echo "== Updating Python dependencies..."
 "$INSTALL_DIR/venv/bin/pip" install -q -r "$INSTALL_DIR/requirements.txt"
-command -v go >/dev/null 2>&1 || {
-  echo "Go is required to build the embedded sing-box core; install golang-go first." >&2
-  exit 1
-}
-make -C "$INSTALL_DIR/cmd/singbox-core" build
 install -d /usr/local/libexec/totalray
-install -m 0755 "$INSTALL_DIR/cmd/singbox-core/singbox-core" \
-  /usr/local/libexec/totalray/singbox-core
+if [ -n "$PREBUILT_CORE" ]; then
+  install -m 0755 "$PREBUILT_CORE" /usr/local/libexec/totalray/singbox-core
+else
+  make -C "$INSTALL_DIR/cmd/singbox-core" build
+  install -m 0755 "$INSTALL_DIR/cmd/singbox-core/singbox-core" \
+    /usr/local/libexec/totalray/singbox-core
+fi
 
 install -m 0644 "$SRC_DIR/systemd/totalray.service" \
   /etc/systemd/system/totalray.service
