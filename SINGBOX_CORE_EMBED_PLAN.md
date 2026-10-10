@@ -128,12 +128,12 @@ wired to it stays identical to today.
 
 ## Tasks
 
-- [ ] Update `systemd/sing-box.service`'s `ExecStart` to the new daemon
+- [x] Update `systemd/sing-box.service`'s `ExecStart` to the new daemon
       binary; the daemon reads the same `/etc/sing-box/config.json` on boot
       and starts the embedded Box the same way `sing-box run` did.
-- [ ] Keep `write_and_check()` in `builder.py` unchanged -- it still validates
+- [x] Keep `write_and_check()` in `builder.py` unchanged -- it still validates
       full configs with `sing-box check` before anything is applied.
-- [ ] `reload_singbox()` (shipped in the previous change) becomes the
+- [x] `reload_singbox()` (shipped in the previous change) becomes the
       fallback path for cases that still need a full restart: rule-set
       changes, main config structural changes, or the daemon itself being
       upgraded. It is not removed.
@@ -186,22 +186,22 @@ of a group -- also worth weighing as a third option).
 
 ## Tasks
 
-- [ ] Decide N (proposed: 2 standbys + 1 active = 3 outbounds registered at
+- [x] Decide N: 2 standbys + 1 active = 3 outbounds registered at
       once; smaller than the leaf plan's default because there is no
       per-candidate process/port cost anymore).
-- [ ] `builder.py`: replace the tag-diff-then-full-rebuild logic with calls to
+- [x] `builder.py`: replace the tag-diff-then-full-rebuild logic with calls to
       the daemon's socket API -- `add_outbound` for a newly promoted Pool B
       candidate, `remove_outbound` for one being retired, `select` via the
       existing Clash API call for switching which one is active. (See the
       note above -- confirm which of the two approaches this actually uses
       before implementing.)
-- [ ] Never `remove_outbound` the tag that is currently selected. If the
+- [x] Never `remove_outbound` the tag that is currently selected. If the
       active tag needs to go, `select` to a healthy standby first, then
       remove it. (Sing-box's own `OutboundManager.Remove` already refuses to
       remove any tag a group statically depends on, selected or not --
       confirmed in Phase 1 -- so this is partly a existing safety net, not
       purely something we must enforce ourselves.)
-- [ ] Unit tests: churn scenarios (add while 3 are already registered, remove
+- [x] Unit tests: churn scenarios (add while 3 are already registered, remove
       the active one, remove a standby) against a mock of the control socket.
 - [ ] Integration test: full pipeline test -- Pool A promotes a candidate,
       it's registered as a standby, and it becomes selectable without any
@@ -231,22 +231,22 @@ that already exist from real traffic -- no extra probe traffic against it.
 
 ## Tasks
 
-- [ ] New module `totalray/health_signal.py`: tail the daemon's log stream (or
+- [x] New module `totalray/health_signal.py`: tail the daemon's log stream (or
       journal, if still routed there) for connection-level error patterns on
       the active outbound's tag specifically -- timeouts, resets, "closed
       pipe" style errors (the same pattern observed live during the SIGHUP
       test).
-- [ ] Maintain a short rolling error-rate window (e.g. errors per 10s) rather
+- [x] Maintain a short rolling error-rate window (e.g. errors per 10s) rather
       than reacting to a single line.
-- [ ] Add an OS-level signal alongside the log one: periodically (e.g. every
+- [x] Add an OS-level signal alongside the log one: periodically (e.g. every
       5s) sample TCP retransmit counters for the active outbound's
       connections (`ss -ti` or `TCP_INFO` via a small helper), since
       retransmits are the kernel's own reaction to real packet loss and are
       completely independent of anything sing-box reports.
-- [ ] Hysteresis: require the error-rate or retransmit-rate to cross a
+- [x] Hysteresis: require the error-rate or retransmit-rate to cross a
       threshold for N consecutive samples (not one) before flagging
       degradation, to avoid reacting to a single blip.
-- [ ] Unit tests: feed synthetic log lines and retransmit samples, assert the
+- [x] Unit tests: feed synthetic log lines and retransmit samples, assert the
       hysteresis window behaves correctly for both a real degradation and a
       one-off blip.
 
@@ -274,12 +274,12 @@ probing a standby carries no risk of disrupting live traffic.
 
 ## Tasks
 
-- [ ] Periodic probe (e.g. every 5-10s) of each standby via the existing
+- [x] Periodic probe (e.g. every 5-10s) of each standby via the existing
       Clash API `/proxies/{tag}/delay` endpoint -- this is sing-box's own
       on-demand urltest-style check for one outbound, safe to call frequently
       against a tag nobody is using yet.
-- [ ] Track each standby's last-known-good status and delay.
-- [ ] Unit tests: mock the Clash API delay endpoint, verify status tracking
+- [x] Track each standby's last-known-good status and delay.
+- [x] Unit tests: mock the Clash API delay endpoint, verify status tracking
       and staleness handling (a standby not successfully probed in N seconds
       is not considered ready).
 
@@ -305,15 +305,15 @@ an actual switch, plus background refill of the vacated slot.
 
 ## Tasks
 
-- [ ] When Phase 4 flags the active outbound as degraded: `select` (via
+- [x] When Phase 4 flags the active outbound as degraded: `select` (via
       Clash API, the already-proven mechanism) to the best ready standby from
       Phase 5.
-- [ ] Flap guard: a minimum cooldown between switches (e.g. 30s), independent
+- [x] Flap guard: a minimum cooldown between switches (e.g. 30s), independent
       of Phase 4's own hysteresis.
-- [ ] After switching, in the background: `remove_outbound` the degraded tag
+- [x] After switching, in the background: `remove_outbound` the degraded tag
       and `add_outbound` the next-best untried Pool B candidate to refill the
       standby slot (Phase 3's mechanism).
-- [ ] Independent circuit breaker: if the newly-promoted standby also
+- [x] Independent circuit breaker: if the newly-promoted standby also
       degrades within a short window repeatedly, stop auto-switching for that
       slot and mark it for manual review, mirroring the existing
       `ApplyCoordinator` circuit breaker but scoped to this new loop.
@@ -340,10 +340,10 @@ feat: wire degradation detection to automatic standby failover
 
 ## Tasks
 
-- [ ] Extend `totalray status` with: which outbound is active, which
+- [x] Extend `totalray status` with: which outbound is active, which
       standbys are registered and their last probe result, recent switch
       history, and circuit-breaker trips for this new loop.
-- [ ] Include these fields in `--json` output.
+- [x] Include these fields in `--json` output.
 
 ## Acceptance Criteria
 

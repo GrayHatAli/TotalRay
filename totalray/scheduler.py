@@ -57,6 +57,11 @@ class Manager:
         # Set up callback to log failovers
         def on_failover(new_tag: str) -> None:
             log.info("Live monitor triggered failover to %s", new_tag)
+            old_tag = self._live_monitor.last_degraded_tag
+            if old_tag:
+                ok, msg = self._coordinator.refill_live_pool({old_tag})
+                log.info("live standby refill after %s -> %s: %s - %s",
+                         old_tag, new_tag, ok, msg)
         
         self._live_monitor.set_failover_callback(on_failover)
         self._live_monitor.start()

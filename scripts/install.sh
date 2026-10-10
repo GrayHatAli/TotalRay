@@ -52,7 +52,7 @@ echo "== Mode: $MODE"
 echo "== [1/8] Installing prerequisites..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-PKGS="curl python3 python3-venv python3-pip sqlite3 nftables jq ca-certificates"
+PKGS="curl python3 python3-venv python3-pip sqlite3 nftables jq ca-certificates golang-go"
 [ "$MODE" = "gateway" ] && PKGS="$PKGS dnsmasq"
 apt-get install -y -qq $PKGS
 
@@ -60,8 +60,9 @@ echo "== [2/8] Installing sing-box..."
 ARCH="$(dpkg --print-architecture)"   # arm64 | armhf | amd64
 case "$ARCH" in arm64|armhf|amd64) ;; *) echo "Unsupported architecture: $ARCH"; exit 1;; esac
 
-VER="$(curl -fsSL --max-time 20 https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null | jq -r '.tag_name // empty' | tr -d 'v' || true)"
-[ -n "$VER" ] || VER="$FALLBACK_VER"
+# The embedded daemon is pinned to this version; keep the validator binary
+# and the library on the same sing-box behavior/API surface.
+VER="${TOTALRAY_SINGBOX_VERSION:-$FALLBACK_VER}"
 echo "   version: $VER - arch: $ARCH"
 
 if ! command -v sing-box >/dev/null 2>&1; then
@@ -81,9 +82,16 @@ install -d /opt/totalray /etc/totalray /var/lib/totalray /etc/sing-box/rules
 rm -rf /opt/totalray/totalray
 cp -r "$SRC_DIR/totalray" /opt/totalray/totalray
 cp "$SRC_DIR/requirements.txt" /opt/totalray/requirements.txt
+install -d /opt/totalray/cmd
+cp -r "$SRC_DIR/cmd/singbox-core" /opt/totalray/cmd/singbox-core
 python3 -m venv /opt/totalray/venv
 /opt/totalray/venv/bin/pip install -q --upgrade pip
 /opt/totalray/venv/bin/pip install -q -r /opt/totalray/requirements.txt
+echo "   building embedded sing-box core..."
+make -C /opt/totalray/cmd/singbox-core build
+install -d /usr/local/libexec/totalray
+install -m 0755 /opt/totalray/cmd/singbox-core/singbox-core \
+  /usr/local/libexec/totalray/singbox-core
 
 cat > /usr/local/bin/totalray <<'WRAPEOF'
 #!/usr/bin/env bash
@@ -148,6 +156,7 @@ fi
 
 echo "== [7/8] Installing services..."
 install -m 0644 "$SRC_DIR/systemd/totalray.service" /etc/systemd/system/totalray.service
+install -m 0644 "$SRC_DIR/systemd/sing-box.service" /etc/systemd/system/sing-box.service
 systemctl daemon-reload
 systemctl enable sing-box
 systemctl enable totalray

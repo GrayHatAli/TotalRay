@@ -32,6 +32,14 @@ DEFAULTS: dict = {
         "urltest_interval": "3m",
         "urltest_tolerance": 50,
         "idle_timeout": "30m",
+        # Number of live pool-B outbounds kept in the selector. The first is
+        # active and the remaining entries are warm standbys.
+        "standby_count": 3,
+    },
+    "singbox_core": {
+        "enabled": True,
+        "socket": "/run/totalray/singbox-core.sock",
+        "binary": "/usr/local/libexec/totalray/singbox-core",
     },
     "live_monitor": {
         # Live connection monitoring for real-time failover on packet drops.
@@ -40,6 +48,16 @@ DEFAULTS: dict = {
         "check_interval_seconds": 2.0,  # How often to check connection health
         "error_threshold": 3,  # Errors in window before triggering failover
         "cooldown_seconds": 60.0,  # Minimum time between failovers
+        "hysteresis_samples": 3,
+        "error_window_seconds": 10.0,
+        "retransmit_threshold": 3,
+        "retransmit_sample_seconds": 5.0,
+        "probe_interval_seconds": 7.0,
+        "probe_timeout_seconds": 5.0,
+        "probe_stale_seconds": 20.0,
+        "circuit_breaker_failures": 3,
+        "circuit_breaker_window_seconds": 300.0,
+        "shadow_mode": True,
     },
     "routing": {
         "iran_direct": True,

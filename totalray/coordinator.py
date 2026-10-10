@@ -141,6 +141,15 @@ class ApplyCoordinator:
             self._save_state()
             log.info("apply coordinator circuit breaker reset")
 
+    def refill_live_pool(self, excluded_tags: set[str]) -> tuple[bool, str]:
+        """Refill a vacated standby slot without a restart."""
+        with self._lock:
+            try:
+                return builder.refill_live_pool(self.settings, self.db, excluded_tags)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("live standby refill failed")
+                return False, str(exc)[:400]
+
     # ── internals ───────────────────────────────────────────────────────
 
     def _apply_locked(self, reason: str, force: bool) -> tuple[bool, str]:

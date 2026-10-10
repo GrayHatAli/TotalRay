@@ -1,0 +1,17 @@
+[Unit]
+Description=sing-box embedded core for TotalRay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+RuntimeDirectory=totalray
+RuntimeDirectoryMode=0750
+ExecStart=/usr/local/libexec/totalray/singbox-core --config /etc/sing-box/config.json --socket /run/totalray/singbox-core.sock
+Restart=on-failure
+RestartSec=3
+User=root
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

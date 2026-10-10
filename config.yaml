@@ -46,9 +46,15 @@ test:
                                # (lower this on low-RAM boards, e.g. Pi 2/3/Zero)
 
 proxy_group:
-  urltest_interval: "3m"      # sing-box's own internal live re-test interval
-  urltest_tolerance: 150       # minimum edge (ms) needed to switch to a better server
+  urltest_interval: "3m"      # legacy compatibility; active group is a selector
+  urltest_tolerance: 150       # legacy compatibility; probing is owned by TotalRay
   idle_timeout: "30m"
+  standby_count: 3             # active outbound plus two warm standbys
+
+singbox_core:
+  enabled: true
+  socket: "/run/totalray/singbox-core.sock"
+  binary: "/usr/local/libexec/totalray/singbox-core"
 
 live_monitor:
   enabled: true               # NEW: real-time connection monitoring with automatic failover
@@ -57,6 +63,16 @@ live_monitor:
   check_interval_seconds: 2.0 # how often to poll Clash API for connection stats
   error_threshold: 3          # errors in sliding window before triggering failover
   cooldown_seconds: 60.0      # minimum time between failovers (prevents rapid switching)
+  hysteresis_samples: 3       # consecutive bad samples before a recommendation
+  error_window_seconds: 10.0
+  retransmit_threshold: 3
+  retransmit_sample_seconds: 5.0
+  probe_interval_seconds: 7.0
+  probe_timeout_seconds: 5.0
+  probe_stale_seconds: 20.0
+  circuit_breaker_failures: 3
+  circuit_breaker_window_seconds: 300.0
+  shadow_mode: true            # set false only after the Phase-8 shadow period
 
 routing:
   iran_direct: true           # Iranian domains/IPs -> direct connection

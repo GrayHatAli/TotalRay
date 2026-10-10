@@ -104,7 +104,7 @@ or `--mode=proxy`) — see [Installation](#installation).
 subscriptions (URLs) --fetch--> pool A (candidates) --test--> pool B (verified)
                                                                     |
                                                           sing-box outbound group
-                                                          (urltest picks the fastest)
+                                                          (selector + warm standbys)
                                                                     |
                         +-------------------------------+-------------------------------+
                   gateway mode:                  proxy mode:                  TotalRay itself
@@ -115,10 +115,10 @@ subscriptions (URLs) --fetch--> pool A (candidates) --test--> pool B (verified)
 - **`sing-box`** does the actual packet interception (`auto_route` +
   `auto_redirect` on a TUN interface, gateway mode) and/or proxying
   (`lan_proxy`, either mode). It runs as its own systemd service
-  (`sing-box.service`, from the upstream package) and is fully
-  config-driven — TotalRay writes `/etc/sing-box/config.json` and
-  restarts it only when the active server set actually changes (see
-  below for why that matters).
+  (`sing-box.service`) using the embedded `singbox-core` daemon and is
+  config-driven — TotalRay writes `/etc/sing-box/config.json`, reconciles
+  routine pool changes over the local control socket, and restarts only for
+  structural/rule changes.
 - **`totalray`** (this project) is the Python management layer:
   fetching/parsing subscriptions, testing servers, scoring, and building
   the sing-box config. It runs as `totalray.service`.
@@ -133,8 +133,9 @@ where frequent restarts of `auto_redirect` can leave stale kernel routes
 behind, eventually causing it to crash-loop (`append ipv4 loopback route:
 file exists`). Two things in TotalRay specifically guard against this:
 
-1. `rebuild_and_apply()` only restarts sing-box when the actual set of
-   server tags in the active group changed — not on every test round.
+1. `rebuild_and_apply()` reconciles routine server membership through the
+   embedded core without restarting the process; only structural changes
+   use the restart fallback.
 2. Pool-B demotion requires `pool_b_demote_grace` (default 2) consecutive
    failures, so a single latency blip doesn't churn group membership (and
    therefore doesn't trigger a restart) for nothing.
@@ -150,9 +151,10 @@ These two mechanisms are complementary, not redundant:
 - **Pool-B test rounds** (every `pool_b_test_minutes`, default 3) verify
   that servers *can* be connected to at all, and demote/remove ones that
   can't (with `pool_b_demote_grace` absorbing one-off blips).
-- **`live_monitor`** doesn't test connectivity independently — it watches
-  the *currently active* connection's real error rate while it's in use,
-  so it reacts within seconds to something going wrong mid-session (a
+- **`live_monitor`** passively watches active-tag daemon errors and kernel
+  retransmits, while probing only inactive standbys through Clash's delay
+  endpoint. In the default staged configuration it logs recommendations in
+  shadow mode; automatic switching is enabled only after validation (a
   server that was fine 90 seconds ago but just started dropping
   packets), instead of waiting for the next scheduled test round.
 
@@ -268,11 +270,14 @@ to forward through yet.
 | | `fail_threshold` | Score at which a config is permanently removed |
 | | `pool_b_demote_grace` | Consecutive failures before leaving pool B |
 | | `chunk_size` | Configs per temporary test sing-box instance - lower this on low-RAM boards (Pi 2/3/Zero, small VPS) |
-| `proxy_group` | `urltest_interval`/`urltest_tolerance` | sing-box's own live re-test of the active group |
+| `proxy_group` | `urltest_interval`/`urltest_tolerance` | Legacy compatibility fields; TotalRay owns probing and selection |
+| | `standby_count` | Active plus warm standbys kept registered by the embedded core |
 | `live_monitor` | `enabled` | Real-time failover on packet drops, independent of pool-B rounds |
 | | `check_interval_seconds` | How often the active connection's health is polled (default 2s) |
 | | `error_threshold` | Errors within a 10s window that trigger an immediate failover (default 3) |
 | | `cooldown_seconds` | Minimum time between live-monitor failovers (default 60s) |
+| | `shadow_mode` | Log failover recommendations without acting until rollout is validated |
+| | `probe_*`, `hysteresis_*`, `retransmit_*` | Standby freshness and passive degradation thresholds |
 | `routing` | `iran_direct` | Route Iranian domains/IPs direct |
 | | `custom_rules` | Extra routing rules (domain/IP matchers to direct or select) |
 | `dns` | `remote_server` | DoH resolver used for non-Iranian domains (must be an IP) |
@@ -306,7 +311,8 @@ The installer places an update command at `/usr/local/sbin/totalray-update`.
 All date/time values shown by `totalray status` use the `Asia/Tehran`
 timezone.
 It downloads the latest `main` branch, updates the application and Python
-dependencies, reloads systemd, and restarts `totalray.service`.
+dependencies, rebuilds the embedded sing-box core, reloads systemd, and
+restarts the managed services as needed.
 
 ```bash
 sudo totalray-update

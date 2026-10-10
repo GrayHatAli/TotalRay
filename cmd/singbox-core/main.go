@@ -8,6 +8,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"log"
 	"os"
@@ -20,11 +21,25 @@ import (
 
 func main() {
 	socketPath := flag.String("socket", "/run/totalray/singbox-core.sock", "control socket path")
+	configPath := flag.String("config", "", "start with a sing-box JSON config at this path")
 	flag.Parse()
 
 	logger := log.New(os.Stderr, "singbox-core: ", log.LstdFlags)
 
 	c := core.New()
+	if *configPath != "" {
+		config, err := os.ReadFile(*configPath)
+		if err != nil {
+			logger.Fatalf("read config: %v", err)
+		}
+		var raw json.RawMessage
+		if err := json.Unmarshal(config, &raw); err != nil {
+			logger.Fatalf("parse config: %v", err)
+		}
+		if err := c.Start(raw); err != nil {
+			logger.Fatalf("start box: %v", err)
+		}
+	}
 	srv := &control.Server{
 		SocketPath: *socketPath,
 		Controller: c,

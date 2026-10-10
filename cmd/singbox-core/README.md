@@ -1,11 +1,11 @@
 # singbox-core
 
-Phase 1 of `SINGBOX_CORE_EMBED_PLAN.md`: a standalone Go daemon embedding
+The embedded Go daemon from `SINGBOX_CORE_EMBED_PLAN.md`: a standalone Go daemon embedding
 sing-box (v1.13.14, pinned to match the Pi's stock binary) as a library,
-controlled over a local Unix socket. It runs completely standalone --
-nothing in `totalray/builder.py` calls it yet, and its default socket path
-(`/run/totalray/singbox-core.sock`) doesn't collide with the production
-sing-box unit's Clash API or config.
+controlled over a local Unix socket. `totalray/builder.py` uses it for
+routine pool reconciliation, while structural/rule changes retain the full
+restart fallback. Its default socket path (`/run/totalray/singbox-core.sock`)
+doesn't collide with the Clash API.
 
 ## Build / test
 
@@ -17,6 +17,11 @@ make build   # -> ./singbox-core
 make test
 make vet
 ```
+
+The installer builds the daemon and installs it as
+`/usr/local/libexec/totalray/singbox-core`. `systemd/sing-box.service` starts
+it with `/etc/sing-box/config.json`; the service name stays `sing-box` so
+existing systemctl and journal tooling remains compatible.
 
 Build tags (`make` already passes these) mirror the protocol/feature set
 the Pi's stock sing-box binary ships with: `with_quic`, `with_wireguard`,
@@ -90,12 +95,9 @@ of whether that tag is the group's *current* selection -- so the "don't
 remove a live/selected tag" caution Phase 1's plan calls for is partly
 enforced by sing-box itself already.
 
-Practical implication for Phase 3's standby pool: promoting a standby to
-active can't be a plain Clash API `select` on a fixed selector. It needs
-either (a) `remove_outbound` the old `selector`/`urltest` group tag and
-`add_outbound` a new one under the *same* tag name with the updated member
-list (route rules keep working unchanged, since they reference the group's
-tag, not its members) -- still zero restarts, just one extra Create/Remove
-pair -- or (b) route new connections directly to the promoted tag instead
-of through a group at all. Worth resolving explicitly before writing
-Phase 3's task list. See `learnings.md` for the detailed writeup.
+Practical implementation in Phase 3: `totalray/standby_pool.py` adds new
+leaf outbounds first, removes the dependent `select` and `auto` groups in
+dependency order, recreates those groups under the same tags, and only then
+retires stale leaves. The active member is moved to a ready standby before a
+retired tag can be removed. This is zero-process-restart, with a short,
+bounded group-replacement window.

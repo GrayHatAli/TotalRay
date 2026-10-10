@@ -296,6 +296,100 @@ def _save_last_tags(settings, tags: set[str]) -> None:
         log.warning("failed to persist group state to %s", path)
 
 
+def _live_config_path(settings) -> str:
+    return os.path.join(settings["paths"]["data_dir"], "live_config.json")
+
+
+def _load_live_config(settings) -> dict | None:
+    try:
+        with open(_live_config_path(settings), "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        # The config on disk is also a valid starting point after upgrading
+        # from the stock sing-box service.
+        try:
+            with open(settings["paths"]["sing_box_config"], "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return None
+
+
+def _save_live_config(settings, config: dict) -> None:
+    path = _live_config_path(settings)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(config, fh, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError:
+        log.warning("failed to persist embedded sing-box state to %s", path)
+
+
+def _embedded_core_settings(settings) -> dict | None:
+    try:
+        cfg = settings["singbox_core"]
+    except (KeyError, TypeError):
+        return None
+    if not isinstance(cfg, dict) or not cfg.get("enabled", False):
+        return None
+    return cfg
+
+
+def _clash_active_tag(settings) -> str | None:
+    clash = settings["clash_api"]
+    headers = {"Authorization": f"Bearer {clash['secret']}"} if clash.get("secret") else {}
+    try:
+        response = requests.get(
+            f"http://{clash['listen']}/proxies/auto", headers=headers, timeout=3)
+        if response.status_code == 200:
+            return response.json().get("now") or None
+    except (requests.RequestException, OSError, ValueError):
+        pass
+    return None
+
+
+def _apply_live_config(settings, config: dict,
+                       previous: dict | None = None) -> tuple[bool, str] | None:
+    """Apply an already validated config through the embedded core.
+
+    ``None`` means this installation is still using the legacy systemd
+    service. A False result is deliberately allowed to fall back to a full
+    reload so upgrades remain recoverable.
+    """
+    core_cfg = _embedded_core_settings(settings)
+    if core_cfg is None:
+        return None
+    from .singbox_core import SingboxCoreClient, SingboxCoreError
+    from .standby_pool import StandbyPool
+
+    client = SingboxCoreClient(core_cfg["socket"])
+    try:
+        if not client.is_running():
+            return False, "embedded core is not running"
+        active_tag = _clash_active_tag(settings)
+        if previous and active_tag:
+            old_auto = next((item for item in previous.get("outbounds", [])
+                             if item.get("tag") == "auto"), {})
+            new_auto = next((item for item in config.get("outbounds", [])
+                             if item.get("tag") == "auto"), {})
+            old_members = set(old_auto.get("outbounds", []))
+            new_members = set(new_auto.get("outbounds", []))
+            if active_tag in old_members and active_tag not in new_members:
+                safe = next(iter(old_members & new_members), None)
+                if not safe:
+                    return False, "no safe standby exists before removing active outbound"
+                ok, switch_msg = set_active_config(settings, safe)
+                if not ok:
+                    return False, f"could not select safe standby {safe}: {switch_msg}"
+                active_tag = safe
+        message = StandbyPool(client).reconcile(config, previous, active_tag)
+    except (OSError, SingboxCoreError) as exc:
+        return False, str(exc)
+    _save_live_config(settings, config)
+    return True, message
+
+
 def set_active_config(settings, tag: str, retries: int = 5, delay: float = 1.0) -> tuple[bool, str]:
     """Point the "auto" selector at `tag` via the Clash API, live -- no
     config rebuild, no sing-box restart, no TUN/route churn, and (since
@@ -493,6 +587,12 @@ def reload_singbox(settings) -> tuple[bool, str]:
     reload doesn't visibly succeed within a few seconds, or if sing-box
     wasn't running to begin with.
     """
+    # singbox-core is a daemon, not the stock sing-box CLI; it has no SIGHUP
+    # reload handler. Structural/rule changes use the existing clean
+    # stop/start path, while routine outbound churn never reaches this path.
+    if _embedded_core_settings(settings) is not None:
+        return restart_singbox()
+
     if not _singbox_is_active():
         log.info("reload_singbox: service not active; starting instead of reloading")
         return _start_singbox()
@@ -528,6 +628,9 @@ def rebuild_and_apply(settings, db, force: bool = False) -> tuple[bool, str]:
     section itself changed and a restart is unavoidable).
     """
     max_n = int(settings["test"]["max_in_group"])
+    standby_count = int(settings["proxy_group"].get("standby_count", 0))
+    if standby_count > 0:
+        max_n = min(max_n, standby_count) if max_n > 0 else standby_count
     group = db.get_pool_configs("b", max_n)
     new_tags = {f"cfg-{item['id']}" for item in group}
     best_tag = f"cfg-{group[0]['id']}" if group else "direct"
@@ -542,15 +645,52 @@ def rebuild_and_apply(settings, db, force: bool = False) -> tuple[bool, str]:
         # fall through to the full rebuild below as a safety net
 
     config = build_config(settings, group)
+    previous_live = _load_live_config(settings)
     ok, msg = write_and_check(settings, config)
     if not ok:
         return False, msg
+    # Membership changes on an embedded core are handled live. This is the
+    # normal Phase-3 path and must not restart the TUN or routing engine.
+    if not force:
+        live_result = _apply_live_config(settings, config, previous_live)
+        if live_result is not None and live_result[0]:
+            _save_last_tags(settings, new_tags)
+            ok2, msg2 = set_active_config(settings, best_tag)
+            if not ok2:
+                log.warning("live post-reconcile selection failed: %s", msg2)
+            return True, f"{live_result[1]} (no restart)"
+        if live_result is not None:
+            log.warning("embedded live apply unavailable (%s); falling back to full reload",
+                        live_result[1])
+
     ok, msg = reload_singbox(settings)
     if not ok:
         return False, f"config written but restart failed: {msg}"
     _save_last_tags(settings, new_tags)
+    _save_live_config(settings, config)
     ok2, msg2 = set_active_config(settings, best_tag)
     if not ok2:
         log.warning("post-restart clash api selection failed: %s (selector default will be used instead)", msg2)
     log.info("new config applied (%d configs in group)", len(group))
     return True, f"{len(group)} configs in group"
+
+
+def refill_live_pool(settings, db, excluded_tags: set[str]) -> tuple[bool, str]:
+    """Replace a failed live member with the next verified candidate."""
+    standby_count = int(settings["proxy_group"].get("standby_count", 3))
+    candidates = db.get_pool_configs("b", max_n=max(standby_count * 3, standby_count))
+    group = [item for item in candidates
+             if f"cfg-{item['id']}" not in excluded_tags][:standby_count]
+    config = build_config(settings, group)
+    previous = _load_live_config(settings)
+    ok, msg = write_and_check(settings, config)
+    if not ok:
+        return False, msg
+    live_result = _apply_live_config(settings, config, previous)
+    if live_result is None:
+        return False, "embedded core is disabled"
+    if not live_result[0]:
+        return False, live_result[1]
+    _save_live_config(settings, config)
+    _save_last_tags(settings, {f"cfg-{item['id']}" for item in group})
+    return True, live_result[1]

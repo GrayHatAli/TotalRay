@@ -571,6 +571,14 @@ def cmd_status(args):
         print(f"live monitor  : {state}{stale} |"
               f" {lm.get('failover_count', 0)} failovers |"
               f" last failover: {_fmt_ago(lm.get('last_failover'))}")
+        signal = lm.get("passive_signal") or {}
+        failover = lm.get("failover") or {}
+        standbys = lm.get("standbys") or {}
+        ready = sum(1 for item in standbys.values() if item.get("ready"))
+        circuit = "OPEN" if failover.get("circuit_open") else "closed"
+        print(f"  passive     : {'degraded' if signal.get('degraded') else 'healthy'} |"
+              f" active={signal.get('active_tag') or '-'} |"
+              f" standbys ready={ready}/{len(standbys)} | breaker={circuit}")
     else:
         print("live monitor  : status unknown (no heartbeat file yet - restart totalray.service)")
 
