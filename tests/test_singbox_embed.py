@@ -124,3 +124,86 @@ def test_client_is_running_uses_control_response(monkeypatch):
     client = SingboxCoreClient("/tmp/unused")
     monkeypatch.setattr(client, "request", lambda command, **fields: {"ok": True, "running": True})
     assert client.is_running()
+
+
+def test_standby_reconcile_retires_active_leaf_when_groups_are_replaced():
+    core = FakeCore()
+    pool = StandbyPool(core)
+    old = _config(["cfg-1", "cfg-2"])
+    new = _config(["cfg-3", "cfg-4"])  # disjoint: nothing survives
+
+    pool.reconcile(new, old, "cfg-1", retire_active=True)
+
+    assert core.calls == [
+        ("add", "cfg-3"),
+        ("add", "cfg-4"),
+        ("remove", "select"),
+        ("remove", "auto"),
+        ("add", "auto"),
+        ("add", "select"),
+        ("remove", "cfg-1"),
+        ("remove", "cfg-2"),
+    ]
+
+
+def test_standby_reconcile_retire_flag_still_refuses_without_group_change():
+    core = FakeCore()
+    pool = StandbyPool(core)
+    groups = _config(["cfg-2"])["outbounds"][:2]
+    old = {"outbounds": groups + [{"type": "direct", "tag": "cfg-1"},
+                                  {"type": "direct", "tag": "cfg-2"}]}
+    new = {"outbounds": groups + [{"type": "direct", "tag": "cfg-2"}]}
+    try:
+        pool.reconcile(new, old, "cfg-1", retire_active=True)
+    except RuntimeError as exc:
+        assert "currently selected" in str(exc)
+    else:
+        raise AssertionError("active removal was allowed without group replacement")
+    assert core.calls == []
+
+
+def _patch_live(monkeypatch, core, active):
+    from totalray import builder, singbox_core
+    switched = []
+    monkeypatch.setattr(builder, "_embedded_core_settings",
+                        lambda settings: {"socket": "/x"})
+    monkeypatch.setattr(builder, "_clash_active_tag", lambda settings: active)
+    monkeypatch.setattr(builder, "_save_live_config", lambda settings, cfg: None)
+    monkeypatch.setattr(builder, "set_active_config",
+                        lambda settings, tag, **kw: (switched.append(tag) or (True, "ok")))
+    monkeypatch.setattr(singbox_core, "SingboxCoreClient", lambda path: core)
+    return builder, switched
+
+
+def test_apply_live_config_disjoint_turnover_does_not_fall_back_to_restart(monkeypatch):
+    core = FakeCore()
+    builder, switched = _patch_live(monkeypatch, core, "cfg-1")
+    old = _config(["cfg-1", "cfg-2"])
+    new = _config(["cfg-3", "cfg-4"])
+
+    result = builder._apply_live_config({}, new, old)
+
+    assert result is not None and result[0] is True
+    assert switched == []  # nothing to park on; group replaced instead
+    assert ("remove", "cfg-1") in core.calls
+    assert core.calls.index(("add", "auto")) < core.calls.index(("remove", "cfg-1"))
+
+
+def test_apply_live_config_prefers_surviving_standby(monkeypatch):
+    core = FakeCore()
+    builder, switched = _patch_live(monkeypatch, core, "cfg-1")
+    old = _config(["cfg-1", "cfg-2"])
+    new = _config(["cfg-2", "cfg-3"])
+
+    result = builder._apply_live_config({}, new, old)
+
+    assert result is not None and result[0] is True
+    assert switched == ["cfg-2"]  # parked on the survivor before retiring cfg-1
+
+
+def test_apply_live_config_empty_new_group_still_falls_back(monkeypatch):
+    core = FakeCore()
+    builder, _ = _patch_live(monkeypatch, core, "cfg-1")
+    result = builder._apply_live_config({}, _config([]), _config(["cfg-1"]))
+    assert result is not None and result[0] is False
+    assert core.calls == []

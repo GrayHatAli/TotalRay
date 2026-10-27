@@ -29,8 +29,15 @@ class StandbyPool:
                 if item.get("tag")}
 
     def reconcile(self, desired: dict, previous: dict | None = None,
-                  active_tag: str | None = None) -> str:
-        """Apply the desired outbounds and return a human-readable summary."""
+                  active_tag: str | None = None,
+                  retire_active: bool = False) -> str:
+        """Apply the desired outbounds and return a human-readable summary.
+
+        ``retire_active`` permits removing the currently selected leaf, but only
+        when the groups are being replaced in the same call: the new ``auto``
+        group no longer references the old leaf, so it is retired (its
+        connections close) instead of forcing a full sing-box restart.
+        """
         if not self.client.is_running():
             raise SingboxCoreError("singbox-core is not running")
 
@@ -40,10 +47,13 @@ class StandbyPool:
         old_tags = set(old)
         new_leaf_tags = (wanted_tags - old_tags) - set(self.GROUP_TAGS)
         removed_leaf_tags = (old_tags - wanted_tags) - set(self.GROUP_TAGS)
-        if active_tag and active_tag in removed_leaf_tags:
-            raise SingboxCoreError(
-                f"refusing to remove currently selected outbound {active_tag}")
         groups_changed = any(wanted.get(tag) != old.get(tag) for tag in self.GROUP_TAGS)
+        if active_tag and active_tag in removed_leaf_tags:
+            if not (retire_active and groups_changed):
+                raise SingboxCoreError(
+                    f"refusing to remove currently selected outbound {active_tag}")
+            log.warning("retiring active outbound %s together with its group "
+                        "replacement (no surviving standby)", active_tag)
 
         for tag in sorted(new_leaf_tags):
             self.client.add_outbound(wanted[tag])

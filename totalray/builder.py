@@ -364,6 +364,7 @@ def _apply_live_config(settings, config: dict,
     from .standby_pool import StandbyPool
 
     client = SingboxCoreClient(core_cfg["socket"])
+    retire_active = False
     try:
         if not client.is_running():
             return False, "embedded core is not running"
@@ -377,13 +378,24 @@ def _apply_live_config(settings, config: dict,
             new_members = set(new_auto.get("outbounds", []))
             if active_tag in old_members and active_tag not in new_members:
                 safe = next(iter(old_members & new_members), None)
-                if not safe:
-                    return False, "no safe standby exists before removing active outbound"
-                ok, switch_msg = set_active_config(settings, safe)
-                if not ok:
-                    return False, f"could not select safe standby {safe}: {switch_msg}"
-                active_tag = safe
-        message = StandbyPool(client).reconcile(config, previous, active_tag)
+                if safe:
+                    ok, switch_msg = set_active_config(settings, safe)
+                    if not ok:
+                        return False, f"could not select safe standby {safe}: {switch_msg}"
+                    active_tag = safe
+                elif new_members:
+                    # Disjoint turnover (the whole previous group dropped out of
+                    # Pool B): no surviving member to park on, but the new
+                    # leaves are created before the groups are replaced, so the
+                    # retired active leaf can go without a full restart.
+                    log.warning("no surviving standby for retired active %s; "
+                                "replacing the group live instead of restarting",
+                                active_tag)
+                    retire_active = True
+                else:
+                    return False, "new group has no members to switch to"
+        message = StandbyPool(client).reconcile(
+            config, previous, active_tag, retire_active=retire_active)
     except (OSError, SingboxCoreError) as exc:
         return False, str(exc)
     _save_live_config(settings, config)
