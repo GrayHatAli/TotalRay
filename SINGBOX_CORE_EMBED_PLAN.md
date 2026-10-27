@@ -137,9 +137,16 @@ wired to it stays identical to today.
       fallback path for cases that still need a full restart: rule-set
       changes, main config structural changes, or the daemon itself being
       upgraded. It is not removed.
-- [ ] Deploy to the Pi via `scripts/update.sh` and confirm `totalray` and the
+- [x] Deploy to the Pi via `scripts/update.sh` and confirm `totalray` and the
       new `sing-box` unit both come up clean, exactly as verified for the
-      SIGHUP change.
+      SIGHUP change. **Done 2026-10-18** (offline: the Pi is `armv7l`, has no Go
+      toolchain and cannot reach GitHub, so `update.sh` now accepts
+      `TOTALRAY_SRC_DIR` + `TOTALRAY_PREBUILT_CORE`, with the core
+      cross-compiled on the Mac via `GOOS=linux GOARCH=arm GOARM=7`). Verified
+      live: unit `ExecStart` is `singbox-core`, control socket present, Clash
+      API on :9090, `singtun0` + `table inet sing-box` up, DNS/HTTP from the
+      Pi OK. The restart fallback path was exercised ~94 times in production
+      with `Result=success`, `NRestarts=0` and no stale-route FATAL.
 
 ## Acceptance Criteria
 
@@ -213,6 +220,30 @@ of a group -- also worth weighing as a third option).
   standby outbound is registered and selectable.
 - Routine Pool B churn causes zero restarts and zero calls to
   `reload_singbox`'s fallback path.
+
+## Post-deploy finding: disjoint pool turnover still restarted (fixed, soak pending)
+
+Measured on the Pi over the first ~2 days after the Phase 2 deploy
+(`journalctl -u totalray`): 124 live applies (`live pool reconciled ... (no
+restart)`) and 102 selector-only switches worked as designed, but **94 applies
+fell back to a full restart, all with the same reason**: `no safe standby
+exists before removing active outbound`. That happened whenever the new Pool B
+group shared no member with the old one and the active outbound was among the
+retired ones. Those restarts tripped the `ApplyCoordinator` circuit breaker 10
+times. Root cause was in `builder._apply_live_config`, not in the daemon:
+`StandbyPool.reconcile` already creates new leaves before replacing
+`auto`/`select`, so no parking spot is needed once the groups are replaced.
+
+Fix (commit `90d683f`): `StandbyPool.reconcile(..., retire_active=True)` lets
+the old active leaf be removed *only* when the groups are replaced in the same
+call; otherwise the "refusing to remove currently selected outbound" guard is
+unchanged. A surviving standby is still preferred when one exists. 5 new unit
+tests (87 total). Deployed to the Pi as a Python-only change (only `totalray`
+restarted, not sing-box).
+
+**Not yet verified live:** the integration-test task above stays open until a
+soak shows the fallback count (`embedded live apply unavailable`) dropping to
+~0 and no new circuit-breaker trips from `membership_changed`.
 
 ## Suggested Commit
 
