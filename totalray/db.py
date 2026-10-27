@@ -88,6 +88,7 @@ CREATE INDEX IF NOT EXISTS idx_test_rounds_pool_started ON test_rounds(pool, sta
 class Database:
     def __init__(self, path: str):
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        self._path = path
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -533,3 +534,92 @@ class Database:
                 "last_test_a": last_round('a'),
                 "last_test_b": last_round('b'),
             }
+
+    # ---------------- retention / maintenance
+    # A removed config is never retested or revived (see _apply_score); its row
+    # only has to keep its `fingerprint` so INSERT OR IGNORE does not re-import
+    # a dead config that a subscription still lists.
+    _REMOVED_AGE = "COALESCE(last_test_at, last_ok_at, created_at)"
+
+    def _retention_steps(self, cfg: dict) -> list:
+        """(key, kind, table, id_col, where, days) -- deletes run before compacts."""
+        age = self._REMOVED_AGE
+        never = f"removed=1 AND last_ok_at IS NULL AND {age} < datetime('now', ?)"
+        ever = f"removed=1 AND last_ok_at IS NOT NULL AND {age} < datetime('now', ?)"
+        heavy = " AND outbound<>''"
+        g = lambda key, default: int(cfg.get(key, default))  # noqa: E731
+        return [
+            ("configs_deleted_never_ok", "delete", "configs", "id", never,
+             g("removed_delete_days", 45)),
+            ("configs_deleted_ever_ok", "delete", "configs", "id", ever,
+             g("removed_ever_ok_delete_days", 90)),
+            ("configs_compacted_never_ok", "compact", "configs", "id", never + heavy,
+             g("removed_compact_days", 3)),
+            ("configs_compacted_ever_ok", "compact", "configs", "id", ever + heavy,
+             g("removed_ever_ok_compact_days", 30)),
+            ("test_log_deleted", "delete", "test_log", "id", "ts < datetime('now', ?)",
+             g("log_days", 30)),
+            ("test_rounds_deleted", "delete", "test_rounds", "id",
+             "started_at < datetime('now', ?)", g("log_days", 30)),
+            ("traffic_log_deleted", "delete", "device_traffic_log", "id",
+             "ts < datetime('now', ?)", g("traffic_log_days", 90)),
+        ]
+
+    def prune(self, cfg: dict | None = None, dry_run: bool = False) -> dict:
+        """Apply the retention policy; returns {step: affected_rows}.
+
+        Work is done in small batches, each in its own transaction, so the
+        scheduler's writers are never blocked for long on the Pi's SD card.
+        Pool membership is untouched (only removed=1 rows and logs), so no
+        generation is bumped.
+        """
+        cfg = cfg or {}
+        batch = max(100, int(cfg.get("batch_size", 5000)))
+        out: dict = {}
+        for key, kind, table, id_col, where, days in self._retention_steps(cfg):
+            modifier = f"-{max(0, days)} days"
+            if dry_run:
+                with self._lock:
+                    out[key] = self._conn.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE {where}",
+                        (modifier,)).fetchone()[0]
+                continue
+            if kind == "delete":
+                sql = (f"DELETE FROM {table} WHERE {id_col} IN "
+                       f"(SELECT {id_col} FROM {table} WHERE {where} LIMIT ?)")
+            else:
+                sql = (f"UPDATE {table} SET name=NULL, link=NULL, outbound='' "
+                       f"WHERE {id_col} IN "
+                       f"(SELECT {id_col} FROM {table} WHERE {where} LIMIT ?)")
+            total = 0
+            while True:
+                with self._lock, self._conn:
+                    n = self._conn.execute(sql, (modifier, batch)).rowcount
+                total += n
+                if n < batch:
+                    break
+            out[key] = total
+        return out
+
+    def file_bytes(self) -> int:
+        """Size of the database plus its WAL (what actually sits on the SD card)."""
+        size = 0
+        for suffix in ("", "-wal"):
+            try:
+                size += os.path.getsize(self._path + suffix)
+            except OSError:
+                pass
+        return size
+
+    def vacuum(self) -> dict:
+        """Rewrite the file so freed space is returned to the OS.
+
+        Holds the DB lock for the duration (writers wait, nothing fails with
+        SQLITE_BUSY). Needs free disk roughly equal to the *live* data size.
+        """
+        before = self.file_bytes()
+        with self._lock:
+            self._conn.commit()
+            self._conn.execute("VACUUM")
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return {"before_bytes": before, "after_bytes": self.file_bytes()}

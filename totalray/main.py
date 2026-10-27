@@ -806,6 +806,33 @@ def cmd_failed_requests(args):
             return
 
 
+def cmd_prune_db(args):
+    settings, db = _load(args)
+    cfg = settings["retention"]
+
+    def mb(n: int) -> str:
+        return f"{n / 1048576:.1f} MB"
+
+    print(f"database: {settings.db_path} ({mb(db.file_bytes())} incl. WAL)")
+    result = db.prune(cfg, dry_run=args.dry_run)
+    print("would affect:" if args.dry_run else "affected rows:")
+    for key, count in result.items():
+        print(f"  {key:<28} {count:>9}")
+    if args.dry_run:
+        print("(dry run: 'compacted' counts include rows the delete steps remove first)")
+    elif args.vacuum:
+        try:
+            res = db.vacuum()
+            print(f"vacuum: {mb(res['before_bytes'])} -> {mb(res['after_bytes'])}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"vacuum failed ({exc}); stop the totalray service first so the"
+                  " database is not being written to, then retry")
+    stats = db.stats()
+    print(f"configs: {stats['total']} total | removed: {stats['removed']} |"
+          f" pool A: {stats['pool_a']} | pool B: {stats['pool_b']}")
+    db.close()
+
+
 # --------------------------------------------------------------- argparse
 
 def main(argv=None):
@@ -846,6 +873,13 @@ def main(argv=None):
     p.add_argument("--json", action="store_true", help="print raw JSON lines")
     p.add_argument("-f", "--follow", action="store_true", help="follow the log (like tail -f)")
     p.set_defaults(fn=cmd_failed_requests)
+
+    p = sub.add_parser("prune-db", help="apply the database retention policy")
+    p.add_argument("--dry-run", action="store_true",
+                   help="only count what would be compacted/deleted")
+    p.add_argument("--vacuum", action="store_true",
+                   help="VACUUM afterwards to shrink the file (stop the service first)")
+    p.set_defaults(fn=cmd_prune_db)
 
     args = parser.parse_args(argv)
     settings, _ = _load_minimal(args)

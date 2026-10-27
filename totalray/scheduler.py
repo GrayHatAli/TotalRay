@@ -133,6 +133,28 @@ class Manager:
         except Exception:  # noqa: BLE001
             log.exception("error during pool-B test round")
 
+    def job_prune_db(self):
+        cfg = self.settings["retention"]
+        if not cfg.get("enabled", True):
+            return
+        try:
+            before = self.db.file_bytes()
+            summary = self.db.prune(cfg)
+            log.info("db retention: %s (db+wal %.1f MB before)", summary, before / 1048576)
+        except Exception:  # noqa: BLE001
+            log.exception("db retention failed")
+
+    def job_vacuum_db(self):
+        cfg = self.settings["retention"]
+        if not cfg.get("enabled", True):
+            return
+        try:
+            res = self.db.vacuum()
+            log.info("db vacuum: %.1f MB -> %.1f MB",
+                     res["before_bytes"] / 1048576, res["after_bytes"] / 1048576)
+        except Exception:  # noqa: BLE001
+            log.exception("db vacuum failed")
+
     def job_update_rules(self):
         if not self._rules_lock.acquire(blocking=False):
             self._round_state.skip("rules", reason="busy", blocked_by="rules_update")
@@ -327,6 +349,16 @@ def run_daemon(settings, db):
     scheduler.add_job(manager.job_sample_traffic, "interval",
                       seconds=int(sch.get("traffic_sample_seconds", 60)),
                       id="traffic", max_instances=1, coalesce=True)
+    # DB retention: prune daily, VACUUM weekly (first runs one interval after
+    # start, so they never compete with the bootstrap test round).
+    ret = settings["retention"]
+    if ret.get("enabled", True):
+        scheduler.add_job(manager.job_prune_db, "interval",
+                          hours=int(ret.get("prune_every_hours", 24)),
+                          id="db_prune", max_instances=1, coalesce=True)
+        scheduler.add_job(manager.job_vacuum_db, "interval",
+                          days=int(ret.get("vacuum_every_days", 7)),
+                          id="db_vacuum", max_instances=1, coalesce=True)
     scheduler.start()
     log.info("scheduler active: subs every %d min | pool-A test every %d min |"
              " pool-B test every %d min | rule-sets every %d h",

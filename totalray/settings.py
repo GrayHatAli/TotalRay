@@ -17,6 +17,22 @@ DEFAULTS: dict = {
         "pool_a_retry_backoff_minutes": 0,
         "traffic_sample_seconds": 60,
     },
+    "retention": {
+        # Soft-deleted configs (removed=1) are never tested or revived again;
+        # they only serve as a dedupe marker for INSERT OR IGNORE on
+        # `fingerprint`. Compact first (drop the heavy columns), delete later.
+        "enabled": True,
+        "prune_every_hours": 24,
+        "vacuum_every_days": 7,
+        "removed_compact_days": 3,
+        "removed_delete_days": 45,
+        # Configs that passed at least once stay restorable for longer.
+        "removed_ever_ok_compact_days": 30,
+        "removed_ever_ok_delete_days": 90,
+        "log_days": 30,
+        "traffic_log_days": 90,
+        "batch_size": 5000,
+    },
     "test": {
         "url": "https://www.gstatic.com/generate_204",
         "timeout_seconds": 10,
