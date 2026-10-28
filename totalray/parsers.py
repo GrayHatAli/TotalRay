@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import urllib.parse
 
 log = logging.getLogger(__name__)
@@ -17,9 +18,87 @@ log = logging.getLogger(__name__)
 SUPPORTED_SCHEMES = ("vmess://", "vless://", "trojan://", "ss://",
                      "hysteria2://", "hy2://", "tuic://")
 
+# uTLS ClientHello names sing-box 1.13 accepts. Anything else makes
+# `sing-box check` reject the WHOLE test batch (Xray's "unsafe", mangled or
+# truncated values such as "chro\u2026"), after which the tester has to bisect
+# the batch with repeated `check` runs to find the culprit.
+UTLS_FINGERPRINTS = frozenset({
+    "chrome", "firefox", "edge", "safari", "360", "qq", "ios", "android",
+    "random", "randomized", "chrome_psk", "chrome_psk_shuffle",
+    "chrome_padding_psk_shuffle", "chrome_pq", "chrome_pq_psk",
+})
+
+# A Reality public key is an X25519 key: 32 bytes, base64url without padding.
+_REALITY_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+
+# Some collectors publish links cut short with a Unicode ellipsis (seen in
+# the wild as "...&pbk=SbVKOEMjK\u2026"). A cut inside the address or
+# credentials (everything before '?') is fatal. A cut in the query tail often
+# only loses non-essential trailing parameters: 239 of 562 such links in the
+# production database still passed a connectivity test at least once, so those
+# are NOT rejected here -- values that would poison a test batch (pbk, fp) are
+# validated individually instead.
+TRUNCATION_MARK = "\u2026"
+
 
 class ParseError(Exception):
     """Invalid link, or an unsupported protocol/feature."""
+
+
+def _normalize_fingerprint(fp: str, reality: bool):
+    """Return a uTLS fingerprint sing-box accepts, or None for "no uTLS".
+
+    Unknown values (e.g. Xray's "unsafe", which means no uTLS spoofing) are
+    dropped for plain TLS; Reality cannot run without uTLS, so it falls back
+    to the widely compatible Chrome fingerprint.
+    """
+    fp = (fp or "").strip().lower()
+    if fp in UTLS_FINGERPRINTS:
+        return fp
+    return "chrome" if reality else None
+
+
+def _normalize_reality_key(pbk: str) -> str:
+    """Validate a Reality public key; accept standard base64 and re-encode it."""
+    key = (pbk or "").strip()
+    if _REALITY_KEY_RE.match(key):
+        return key
+    # Standard-alphabet / padded variants decode to the same 32 bytes.
+    candidate = key.replace("+", "-").replace("/", "_").rstrip("=")
+    if _REALITY_KEY_RE.match(candidate):
+        return candidate
+    raise ParseError("reality public_key is not a valid 32-byte key")
+
+
+def sanitize_outbound(outbound: dict) -> dict:
+    """Make an outbound that came from a JSON subscription safe to test.
+
+    Link parsers already normalise through ``_build_tls``; this applies the
+    same rules to outbounds taken verbatim from a sing-box client config.
+    Returns a (shallow-)copied outbound, or raises ParseError.
+    """
+    tls = outbound.get("tls")
+    if not isinstance(tls, dict):
+        return outbound
+    tls = dict(tls)
+    reality = tls.get("reality")
+    is_reality = isinstance(reality, dict) and bool(reality.get("enabled"))
+    if is_reality:
+        reality = dict(reality)
+        reality["public_key"] = _normalize_reality_key(
+            str(reality.get("public_key") or ""))
+        tls["reality"] = reality
+    utls = tls.get("utls")
+    if isinstance(utls, dict) and (utls.get("enabled") or is_reality):
+        fp = _normalize_fingerprint(str(utls.get("fingerprint") or ""), is_reality)
+        if fp is None:
+            tls.pop("utls", None)
+        else:
+            # Reality cannot run without uTLS, so force it on.
+            tls["utls"] = {**utls, "enabled": True, "fingerprint": fp}
+    elif is_reality:
+        tls["utls"] = {"enabled": True, "fingerprint": "chrome"}
+    return {**outbound, "tls": tls}
 
 
 def _b64decode(data: str) -> bytes:
@@ -71,11 +150,12 @@ def _build_tls(params: dict, default_sni: str = "", force: bool = False):
         if insecure:
             tls["insecure"] = True
         fp = _first(params, "fp")
-        if fp or security == "reality":
-            # sing-box requires uTLS for Reality clients. Subscription links
-            # often omit fp, so use the widely compatible Chrome fingerprint.
-            tls["utls"] = {"enabled": True,
-                            "fingerprint": fp or "chrome"}
+        # sing-box requires uTLS for Reality clients, and links often omit
+        # fp or carry values sing-box rejects, so normalise (see
+        # _normalize_fingerprint) instead of passing them through.
+        fp = _normalize_fingerprint(fp, security == "reality")
+        if fp:
+            tls["utls"] = {"enabled": True, "fingerprint": fp}
         alpn = _first(params, "alpn")
         if alpn:
             tls["alpn"] = [a for a in alpn.split(",") if a]
@@ -83,7 +163,8 @@ def _build_tls(params: dict, default_sni: str = "", force: bool = False):
             pbk = _first(params, "pbk")
             if not pbk:
                 raise ParseError("reality without a public_key (pbk)")
-            tls["reality"] = {"enabled": True, "public_key": pbk}
+            tls["reality"] = {"enabled": True,
+                              "public_key": _normalize_reality_key(pbk)}
             sid = _first(params, "sid")
             if sid:
                 tls["reality"]["short_id"] = sid
@@ -402,6 +483,14 @@ def parse_singbox_config(text: str) -> tuple[list, int, dict]:
             entry["count"] += 1
             continue
         outbound = {k: v for k, v in ob.items() if k != "tag"}
+        try:
+            outbound = sanitize_outbound(outbound)
+        except ParseError as exc:
+            bad += 1
+            entry = reasons.setdefault(
+                str(exc), {"count": 0, "example": f"{typ}: {exc}"})
+            entry["count"] += 1
+            continue
         fp = fingerprint(outbound)
         if fp in seen:
             continue
@@ -440,6 +529,11 @@ def parse_link(link: str) -> dict:
     # doesn't masquerade as corrupt/unsupported data.
     if "&amp;" in link:
         link = link.replace("&amp;", "&")
+    # An ellipsis before the '?' means the uuid/host/port itself was cut off.
+    # (One in the query tail or in the #remark is handled/harmless, see
+    # TRUNCATION_MARK.)
+    if TRUNCATION_MARK in link.split("#", 1)[0].split("?", 1)[0]:
+        raise ParseError("truncated link: address or credentials cut off at the source")
     for scheme, parser in _PARSERS.items():
         if link.lower().startswith(scheme):
             outbound, name = parser(link)
