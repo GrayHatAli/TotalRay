@@ -210,9 +210,12 @@ of a group -- also worth weighing as a third option).
       purely something we must enforce ourselves.)
 - [x] Unit tests: churn scenarios (add while 3 are already registered, remove
       the active one, remove a standby) against a mock of the control socket.
-- [ ] Integration test: full pipeline test -- Pool A promotes a candidate,
+- [x] Integration test: full pipeline test -- Pool A promotes a candidate,
       it's registered as a standby, and it becomes selectable without any
-      restart.
+      restart. **Verified live on the Pi, 2026-10-27 11:08 -> 2026-10-28 12:29
+      (~25 h):** 164 live applies, 45 selector-only switches and 71 live
+      retire-active group replacements, with **0** fallbacks to a full
+      restart, **0** circuit-breaker trips and **0** sing-box starts.
 
 ## Acceptance Criteria
 
@@ -221,7 +224,7 @@ of a group -- also worth weighing as a third option).
 - Routine Pool B churn causes zero restarts and zero calls to
   `reload_singbox`'s fallback path.
 
-## Post-deploy finding: disjoint pool turnover still restarted (fixed, soak pending)
+## Post-deploy finding: disjoint pool turnover still restarted (fixed and soaked)
 
 Measured on the Pi over the first ~2 days after the Phase 2 deploy
 (`journalctl -u totalray`): 124 live applies (`live pool reconciled ... (no
@@ -241,9 +244,12 @@ unchanged. A surviving standby is still preferred when one exists. 5 new unit
 tests (87 total). Deployed to the Pi as a Python-only change (only `totalray`
 restarted, not sing-box).
 
-**Not yet verified live:** the integration-test task above stays open until a
-soak shows the fallback count (`embedded live apply unavailable`) dropping to
-~0 and no new circuit-breaker trips from `membership_changed`.
+**Verified live (2026-10-28):** over the ~25 h after the fix the Pi logged 0
+fallbacks (`embedded live apply unavailable`), 0 circuit-breaker trips and 0
+sing-box starts, against 94 fallbacks, 10 trips and ~94 starts in the first two
+days. The zero-restart acceptance criterion is met. The other one ("at least
+one verified standby at all times") was not measured separately and stays to be
+checked; Phase 6 (netem) and Phase 8 (shadow rollout) also remain open.
 
 ## Suggested Commit
 
