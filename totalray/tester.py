@@ -18,15 +18,19 @@ DEFAULT_CHUNK_SIZE = 96
 PORT_WAIT_SECONDS = 8.0
 
 
+def _port_open(port: int) -> bool:
+    with socket.socket() as sock:
+        sock.settimeout(0.25)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
 def _wait_ports(ports, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     remaining = set(ports)
     while time.monotonic() < deadline and remaining:
         for port in list(remaining):
-            with socket.socket() as sock:
-                sock.settimeout(0.25)
-                if sock.connect_ex(("127.0.0.1", port)) == 0:
-                    remaining.discard(port)
+            if _port_open(port):
+                remaining.discard(port)
         if remaining:
             time.sleep(0.15)
     return not remaining
@@ -99,15 +103,19 @@ def measure(port: int, url: str, timeout: int, retries: int) -> int:
 
 
 class GroupTester:
-    def __init__(self, settings):
+    def __init__(self, settings, pool: str = "a"):
         self.bin = settings["paths"]["sing_box_bin"]
         test = settings["test"]
         self.url = test["url"]
         self.timeout = int(test["timeout_seconds"])
         self.concurrency = int(test["concurrency"])
         self.retries = int(test["retries"])
-        self.base_port = int(test["base_port"])
         self.chunk_size = int(test.get("chunk_size", DEFAULT_CHUNK_SIZE))
+        # Pool A and Pool B rounds run at the same time, and each test
+        # sing-box binds one local port per config. Give Pool B its own
+        # range right after Pool A's so the two never share a port.
+        offset = self.chunk_size if pool == "b" else 0
+        self.base_port = int(test["base_port"]) + offset
         self.dns_server = settings["dns"]["local_server"]
 
     def _check_items(self, items: list) -> tuple[bool, str]:
@@ -158,6 +166,15 @@ class GroupTester:
                      len(items))
 
         cfg = build_test_config(items, self.base_port, self.dns_server)
+        ports = [self.base_port + i for i in range(len(items))]
+        # A port that already answers belongs to someone else (another test
+        # round, a leftover process). Starting anyway would make us measure
+        # the wrong sing-box and score configs by someone else's results.
+        busy = [p for p in ports if _port_open(p)]
+        if busy:
+            raise RuntimeError(
+                f"test ports already in use: {busy[:5]}"
+                f"{' ...' if len(busy) > 5 else ''}")
         fd, path = tempfile.mkstemp(prefix="totalray-test-", suffix=".json")
         try:
             with os.fdopen(fd, "w") as fh:
@@ -166,9 +183,12 @@ class GroupTester:
                                     stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL)
             try:
-                ports = [self.base_port + i for i in range(len(items))]
                 if not _wait_ports(ports, PORT_WAIT_SECONDS):
                     log.warning("some test ports never came up")
+                if proc.poll() is not None:
+                    raise RuntimeError(
+                        f"test sing-box exited during startup "
+                        f"(code {proc.returncode})")
                 with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
                     futures = {
                         pool.submit(measure, self.base_port + i,

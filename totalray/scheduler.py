@@ -282,17 +282,20 @@ class Manager:
         if existing != "running":
             self._round_state.start("pool_b", round_id=rid, total=len(candidates),
                                     snapshot_generation=snapshot_generation)
-        tester = GroupTester(self.settings)
-        results = tester.test_all(candidates)
+        tester = GroupTester(self.settings, pool="b")
         ping_threshold = int(self.settings["test"]["ping_threshold_ms"])
         fail_threshold = int(self.settings["test"]["fail_threshold"])
         try:
+            # Anything raised while testing must close the round. Otherwise
+            # the state stays "running" and job_test_pool_b skips every
+            # later round until the daemon restarts.
+            results = tester.test_all(candidates)
             stats = self.db.record_pool_b_results(
                 results, ping_threshold, fail_threshold,
                 round_id=rid, snapshot_generation=snapshot_generation)
         except Exception as exc:
             self.db.finish_test_round(
-                rid, state="failed", total=len(results), ok=0, failed=0,
+                rid, state="failed", total=0, ok=0, failed=0,
                 stale=0, error=str(exc)[:400])
             self._round_state.finish("pool_b", success=False, error=str(exc)[:400])
             raise
