@@ -229,8 +229,32 @@ class Database:
         return {r["source_sub"]: r["c"] for r in rows}
 
     def enabled_subscriptions(self) -> list:
-        """Backwards-compatible alias for older subfetch.py code."""
-        return self.list_subscriptions()
+        """Subscriptions that should be fetched (the ``enabled`` flag is honoured)."""
+        with self._lock:
+            return [dict(r) for r in self._conn.execute(
+                "SELECT * FROM subscriptions WHERE enabled=1 ORDER BY id")]
+
+    def remove_subscription(self, sub_id: int) -> tuple[bool, int]:
+        """Delete a subscription and retire its configs (soft-delete).
+
+        Returns ``(existed, configs_retired)``. Retired configs leave their
+        pools, so the next apply drops them from sing-box too.
+        """
+        with self._lock, self._conn:
+            exists = self._conn.execute(
+                "SELECT 1 FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
+            if not exists:
+                return False, 0
+            pools = [r["pool"] for r in self._conn.execute(
+                "SELECT DISTINCT pool FROM configs WHERE source_sub=? AND removed=0",
+                (sub_id,))]
+            cur = self._conn.execute(
+                "UPDATE configs SET removed=1 WHERE source_sub=? AND removed=0",
+                (sub_id,))
+            self._conn.execute("DELETE FROM subscriptions WHERE id=?", (sub_id,))
+            if pools:
+                self._bump_generations(*pools)
+            return True, cur.rowcount
 
     def set_sub_status(self, sub_id: int, status: str, count: int = None) -> None:
         """Record the outcome of the last fetch attempt for a subscription."""

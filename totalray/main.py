@@ -68,9 +68,13 @@ def cmd_add_sub(args):
 
 def cmd_del_sub(args):
     settings, db = _load(args)
-    db.remove_subscription(args.id)
-    print(f"subscription #{args.id} removed")
+    existed, retired = db.remove_subscription(args.id)
     db.close()
+    if not existed:
+        print(f"no subscription with id {args.id}")
+        sys.exit(1)
+    print(f"subscription #{args.id} removed ({retired} configs retired)")
+    print("  note: a URL that is still listed in config.yaml is re-added on the next update.")
 
 
 def cmd_list(args):
