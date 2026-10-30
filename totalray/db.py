@@ -140,18 +140,17 @@ class Database:
         skips rows tested within that window so bounded scans make steady
         progress without repeatedly probing the same configs.
         """
+        sql = ("SELECT id, name, outbound, last_delay FROM configs"
+               " WHERE removed=0 AND pool=?")
+        params: list = [pool]
+        if retry_backoff_minutes > 0:
+            sql += (" AND (last_test_at IS NULL"
+                    " OR last_test_at <= datetime('now', ?))")
+            params.append(f"-{int(retry_backoff_minutes)} minutes")
+        sql += " ORDER BY last_test_at IS NOT NULL, last_test_at"
         with self._lock:
             generation = self._generation(f"pool_{pool}_generation")
-            rows = self._conn.execute(
-                "SELECT id, name, outbound, last_delay FROM configs"
-                " WHERE removed=0 AND pool=?"
-                " ORDER BY last_test_at IS NOT NULL, last_test_at",
-                (pool,)).fetchall()
-        if retry_backoff_minutes > 0:
-            import datetime
-            cutoff = datetime.datetime.utcnow() - datetime.timedelta(minutes=retry_backoff_minutes)
-            rows = [r for r in rows if r["last_test_at"] is None or
-                    str(r["last_test_at"])[:19] <= cutoff.strftime("%Y-%m-%d %H:%M:%S")]
+            rows = self._conn.execute(sql, params).fetchall()
         if max_n and max_n > 0:
             rows = rows[:max_n]
         candidates = [{"id": r["id"], "name": r["name"],
@@ -391,12 +390,13 @@ class Database:
             previous = round_row or {"total": 0, "ok": 0, "failed": 0, "stale": 0}
             self._conn.execute(
                 "UPDATE test_rounds SET state=?, total=?, ok=?, failed=?, stale=?,"
-                " finished_at=?, error=NULL WHERE id=?",
+                " finished_at=CASE WHEN ? THEN datetime('now') END, error=NULL"
+                " WHERE id=?",
                 ("finished" if auto_finish or generation_stale else "running",
                  previous["total"] + len(results),
                  previous["ok"] + ok, previous["failed"] + failed,
                  previous["stale"] + stale,
-                 "datetime('now')" if auto_finish or generation_stale else None, round_id))
+                 1 if auto_finish or generation_stale else 0, round_id))
         return {"round_id": round_id, "snapshot_generation": snapshot_generation,
                 "total": len(results), "ok": ok, "failed": failed,
                 "stale": stale, "removed": removed_ids}
