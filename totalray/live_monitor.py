@@ -338,8 +338,11 @@ class LiveMonitor:
             return cfg_tag
         return None
 
-    def _do_failover(self, new_tag: str) -> bool:
-        """Switch to a new server via Clash API."""
+    def _do_failover(self, new_tag: str) -> tuple[bool, str]:
+        """Switch to a new server via Clash API.
+
+        Returns ``(ok, message)``, the shape FailoverController expects.
+        """
         from . import builder
 
         ok, msg = builder.set_active_config(self.settings, new_tag)
@@ -357,11 +360,16 @@ class LiveMonitor:
             )
             self._write_status({"last_target": new_tag})
             if self._on_failover:
-                self._on_failover(new_tag)
-            return True
+                # The switch already happened; a failing refill callback
+                # must not make it look like the switch failed.
+                try:
+                    self._on_failover(new_tag)
+                except Exception:  # noqa: BLE001
+                    log.exception("post-failover callback failed")
+            return True, f"switched to {new_tag}"
         log.error("Live failover to %s failed: %s", new_tag, msg)
         self._write_status({"last_failover_error": msg})
-        return False
+        return False, msg
 
     def _monitor_loop(self) -> None:
         """Main monitoring loop."""

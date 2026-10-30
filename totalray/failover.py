@@ -21,6 +21,7 @@ class FailoverController:
         self.last_target: str | None = None
         self.history: deque[dict] = deque(maxlen=50)
         self._failures: deque[float] = deque()
+        self._promotion_counted = False
         self.circuit_open = False
 
     def choose(self, ready: list) -> str | None:
@@ -35,14 +36,19 @@ class FailoverController:
             return False, "no ready standby"
         if self.circuit_open:
             return False, "failover circuit breaker open"
-        if self.last_target == active_tag and self.last_switch is not None:
+        # Cooldown comes first: right after a switch the degraded signal is
+        # still on for a few polls, and those must not count as failures.
+        if self.last_switch is not None and now - self.last_switch < self.cooldown_seconds:
+            return False, "failover cooldown active"
+        if (self.last_target == active_tag and self.last_switch is not None
+                and not self._promotion_counted):
             # The server promoted by the previous switch is now the one
-            # reporting degradation; count that as a failed promotion.
+            # reporting degradation; count that as a failed promotion --
+            # once per promotion, not once per poll.
+            self._promotion_counted = True
             self.record_promoted_failure(now)
             if self.circuit_open:
                 return False, "failover circuit breaker opened after repeated promoted failures"
-        if self.last_switch is not None and now - self.last_switch < self.cooldown_seconds:
-            return False, "failover cooldown active"
         event = {"at": now, "from": active_tag, "to": target,
                  "shadow": self.shadow_mode, "ok": False}
         if self.shadow_mode:
@@ -56,6 +62,7 @@ class FailoverController:
         if ok:
             self.last_switch = now
             self.last_target = target
+            self._promotion_counted = False
         else:
             self._failures.append(now)
             if len(self._failures) >= self.max_failures:
@@ -86,3 +93,7 @@ class FailoverController:
         cutoff = now - self.failure_window_seconds
         while self._failures and self._failures[0] < cutoff:
             self._failures.popleft()
+        # Once every failure has aged out of the window, let failover try
+        # again instead of staying off until the daemon restarts.
+        if self.circuit_open and not self._failures:
+            self.circuit_open = False
