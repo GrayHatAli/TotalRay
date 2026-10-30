@@ -14,7 +14,6 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Callable
 
 import requests
@@ -259,32 +258,12 @@ class LiveMonitor:
         total_download = 0
         total_upload = 0
 
-        # Analyze connection patterns - check last 50 connections
-        short_lived_count = 0
-        
+        # /connections lists only connections that are still open, so a
+        # connection that is under a second old is a NEW connection, not a
+        # failed one: a normal page load opens several at once. This list
+        # cannot tell us about errors; the sing-box log and the retransmit
+        # sampler do that. Here we only collect the throughput numbers.
         for conn in connections[-50:]:
-            # Look for connections that closed very quickly (< 1s)
-            # which often indicates connection failures
-            start_time_str = conn.get("start", "")
-            duration = 0.0
-            if start_time_str:
-                try:
-                    # Parse ISO timestamp (e.g., "2024-01-15T10:30:00Z")
-                    start_dt = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-                    start_ts = start_dt.timestamp()
-                    duration = now - start_ts
-                    
-                    # Connection lasting less than 1 second with data transfer
-                    # likely indicates a failed/retried connection
-                    if duration < 1.0:
-                        short_lived_count += 1
-                        if short_lived_count >= 3:  # Multiple short-lived = degradation
-                            error_count += 1
-                except (ValueError, TypeError, AttributeError):
-                    # Can't parse timestamp, skip duration check
-                    pass
-
-            # Accumulate per-connection throughput for the sample
             download = conn.get("download", 0) or 0
             upload = conn.get("upload", 0) or 0
             total_download += download

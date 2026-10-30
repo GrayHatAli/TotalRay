@@ -146,31 +146,27 @@ class TestLiveMonitorHealthCheck:
             assert is_healthy is True
             assert errors == 0
 
-    def test_short_lived_connections_detected_as_errors(self):
-        """Multiple short-lived connections indicate degradation."""
+    def test_burst_of_new_connections_is_not_an_error(self):
+        """A page load opens several connections at once; that is normal."""
         settings = Mock(data_dir="/tmp/totalray-test")
         settings.data = {"clash_api": {"listen": "127.0.0.1:9090", "secret": ""}}
         db = Mock()
-        
+
         monitor = LiveMonitor(settings, db)
-        
-        # Create connections with very recent start times (guaranteed < 1s old)
-        # Use a fixed timestamp format that will parse correctly
+
         now = time.time()
-        connections = []
-        for i in range(5):
-            # Use a timestamp just milliseconds ago to ensure duration < 1s
-            conn = {
-                "start": datetime.fromtimestamp(now - 0.1).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-                "download": 100,
-                "upload": 50
-            }
-            connections.append(conn)
-        
+        connections = [
+            {"start": datetime.fromtimestamp(now - 0.1).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+             "download": 100, "upload": 50}
+            for _ in range(10)
+        ]
+
         with patch.object(monitor, '_get_connections', return_value=connections):
-            is_healthy, errors = monitor._check_connection_health()
-            # Should detect errors due to multiple short-lived connections (>=3 triggers error)
-            assert errors >= 1
+            for _ in range(5):
+                is_healthy, errors = monitor._check_connection_health()
+                assert errors == 0
+                assert is_healthy
+        assert not monitor._signal.snapshot()["degraded"]
 
     def test_zero_throughput_not_counted_immediately(self):
         """Zero throughput on new connections shouldn't immediately trigger errors."""

@@ -1,6 +1,7 @@
 """Passive degradation signals with rolling windows and hysteresis."""
 from __future__ import annotations
 
+import ipaddress
 import re
 import subprocess
 import threading
@@ -84,26 +85,79 @@ class DegradationDetector:
         }
 
 
-class RetransmitSampler:
-    """Best-effort kernel sample; it generates no probe traffic."""
+# ss prints one header line per socket (state, queues, local, peer, process),
+# then an indented line with the kernel counters.
+_SOCKET_HEADER = re.compile(r"^\S+\s+\d+\s+\d+\s+(\S+)\s+(\S+)\s*(.*)$")
+# retrans:<in flight>/<total segments retransmitted over the socket's life>
+_RETRANS_TOTAL = re.compile(r"\bretrans:\d+/(\d+)")
+TUNNEL_PROCESSES = ("sing-box", "singbox-core")
 
-    def __init__(self, runner=subprocess.run):
+
+def _is_public_peer(peer: str) -> bool:
+    host = peer.rpartition(":")[0].strip("[]").split("%")[0]
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return not (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_unspecified or ip.is_multicast)
+
+
+class RetransmitSampler:
+    """Counts TCP segments retransmitted since the previous sample.
+
+    Only sockets owned by sing-box that talk to a public address count:
+    those are the tunnel's own connections. Retransmits on LAN-side or
+    unrelated sockets say nothing about the active server. The kernel
+    keeps a lifetime total per socket, so the first sample only sets the
+    baseline and every later sample returns how much the totals grew.
+    Best effort; it generates no probe traffic.
+    """
+
+    def __init__(self, runner=subprocess.run, processes=TUNNEL_PROCESSES):
         self.runner = runner
+        self.processes = tuple(processes)
+        self._seen: dict[tuple[str, str], int] = {}
+        self._primed = False
 
     def sample(self) -> int:
         try:
-            proc = self.runner(["ss", "-tin"], capture_output=True,
+            proc = self.runner(["ss", "-tinp"], capture_output=True,
                                text=True, timeout=3)
         except (OSError, subprocess.SubprocessError):
             return 0
-        total = 0
+        current: dict[tuple[str, str], int] = {}
+        key = None
         for line in proc.stdout.splitlines():
-            for pattern in (r"bytes_retrans:(\d+)", r"retrans:(\d+)"):
-                match = re.search(pattern, line)
-                if match:
-                    total += int(match.group(1))
-                    break
-        return total
+            if not line.strip():
+                continue
+            if not line[0].isspace():
+                key = self._tunnel_socket_key(line)
+                continue
+            if key is None:
+                continue
+            match = _RETRANS_TOTAL.search(line)
+            current[key] = int(match.group(1)) if match else 0
+        grown = 0
+        if self._primed:
+            for socket_key, total in current.items():
+                grown += max(0, total - self._seen.get(socket_key, 0))
+        self._seen = current
+        self._primed = True
+        return grown
+
+    def _tunnel_socket_key(self, line: str):
+        match = _SOCKET_HEADER.match(line)
+        if not match:
+            return None
+        local, peer, rest = match.groups()
+        if not any(f'"{name}"' in rest for name in self.processes):
+            return None
+        if not _is_public_peer(peer):
+            return None
+        return (local, peer)
 
 
 class JournalTailer:

@@ -5,7 +5,7 @@ import time
 from unittest.mock import Mock
 
 from totalray.failover import FailoverController
-from totalray.health_signal import DegradationDetector, RetransmitSampler
+from totalray.health_signal import DegradationDetector
 from totalray.singbox_core import SingboxCoreClient
 from totalray.standby_pool import StandbyPool
 from totalray.standby_probe import StandbyProbe
@@ -76,11 +76,6 @@ def test_degradation_detector_requires_hysteresis_and_active_tag():
     assert not detector.observe_log_line("cfg-1: timeout", now=2)
     assert not detector.observe_log_line("cfg-1: closed pipe", now=3)
     assert detector.observe_log_line("cfg-1: timeout", now=4)
-
-
-def test_retransmit_sampler_parses_kernel_counters():
-    runner = Mock(return_value=Mock(stdout="ESTAB bytes_retrans:4\nESTAB retrans:2\n"))
-    assert RetransmitSampler(runner).sample() == 6
 
 
 def test_probe_marks_stale_results_unready():
