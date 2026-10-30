@@ -49,10 +49,32 @@ case "$MODE" in
 esac
 echo "== Mode: $MODE"
 
+# ---- embedded core: prebuilt binary or a Go toolchain ------------------
+# Check this BEFORE touching the system, so a missing toolchain cannot
+# leave a half-installed box. Distro Go packages are often too old (Debian
+# 12 ships 1.19); Go 1.21+ fetches the exact toolchain go.mod asks for.
+PREBUILT_CORE="${TOTALRAY_PREBUILT_CORE:-}"
+if [ -n "$PREBUILT_CORE" ]; then
+  [ -x "$PREBUILT_CORE" ] || { echo "Prebuilt core $PREBUILT_CORE is not executable."; exit 1; }
+else
+  GO_VER="$(go env GOVERSION 2>/dev/null | sed 's/^go//' || true)"
+  if [ -z "$GO_VER" ] || [ "$(printf '%s\n1.21\n' "$GO_VER" | sort -V | sed -n 1p)" != "1.21" ]; then
+    cat >&2 <<'MSG'
+The embedded sing-box core has to be built with Go 1.21 or newer
+(found: none or older). Either:
+  - install a current Go from https://go.dev/dl/ and re-run, or
+  - build singbox-core elsewhere (make -C cmd/singbox-core build, e.g. with
+    GOOS=linux GOARCH=arm64) and re-run with
+      TOTALRAY_PREBUILT_CORE=/path/to/singbox-core sudo -E bash scripts/install.sh
+MSG
+    exit 1
+  fi
+fi
+
 echo "== [1/8] Installing prerequisites..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-PKGS="curl python3 python3-venv python3-pip sqlite3 nftables jq ca-certificates golang-go"
+PKGS="curl python3 python3-venv python3-pip sqlite3 nftables jq ca-certificates"
 [ "$MODE" = "gateway" ] && PKGS="$PKGS dnsmasq"
 apt-get install -y -qq $PKGS
 
@@ -87,11 +109,16 @@ cp -r "$SRC_DIR/cmd/singbox-core" /opt/totalray/cmd/singbox-core
 python3 -m venv /opt/totalray/venv
 /opt/totalray/venv/bin/pip install -q --upgrade pip
 /opt/totalray/venv/bin/pip install -q -r /opt/totalray/requirements.txt
-echo "   building embedded sing-box core..."
-make -C /opt/totalray/cmd/singbox-core build
 install -d /usr/local/libexec/totalray
-install -m 0755 /opt/totalray/cmd/singbox-core/singbox-core \
-  /usr/local/libexec/totalray/singbox-core
+if [ -n "$PREBUILT_CORE" ]; then
+  echo "   installing prebuilt embedded sing-box core..."
+  install -m 0755 "$PREBUILT_CORE" /usr/local/libexec/totalray/singbox-core
+else
+  echo "   building embedded sing-box core..."
+  make -C /opt/totalray/cmd/singbox-core build
+  install -m 0755 /opt/totalray/cmd/singbox-core/singbox-core \
+    /usr/local/libexec/totalray/singbox-core
+fi
 
 cat > /usr/local/bin/totalray <<'WRAPEOF'
 #!/usr/bin/env bash
@@ -127,7 +154,8 @@ fi
 
 echo "== [5/8] Generating a random proxy password..."
 if grep -q '^  password: "CHANGE_ME"' /etc/totalray/config.yaml; then
-  RANDPASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)"
+  # (not `tr ... </dev/urandom | head`: under pipefail that pipe exits 141)
+  RANDPASS="$(python3 -c 'import secrets; print(secrets.token_hex(10))')"
   sed -i "s|^  password: \"CHANGE_ME\"|  password: \"$RANDPASS\"|" /etc/totalray/config.yaml
 fi
 

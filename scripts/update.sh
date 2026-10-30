@@ -61,6 +61,17 @@ fi
   exit 1
 }
 
+# Build the core BEFORE stopping anything: compiling on a Pi takes minutes,
+# and the LAN has no internet while the gateway services are stopped. A
+# failed build now exits here, with the running install untouched.
+if [ -n "$PREBUILT_CORE" ]; then
+  CORE_BIN="$PREBUILT_CORE"
+else
+  echo "== Building the embedded sing-box core (the gateway keeps running)..."
+  make -C "$SRC_DIR/cmd/singbox-core" build
+  CORE_BIN="$SRC_DIR/cmd/singbox-core/singbox-core"
+fi
+
 echo "== Stopping TotalRay..."
 if systemctl is-active --quiet "$SERVICE"; then
   SERVICE_WAS_ACTIVE=1
@@ -83,13 +94,7 @@ cp -a "$SRC_DIR/cmd/singbox-core" "$INSTALL_DIR/cmd/singbox-core"
 echo "== Updating Python dependencies..."
 "$INSTALL_DIR/venv/bin/pip" install -q -r "$INSTALL_DIR/requirements.txt"
 install -d /usr/local/libexec/totalray
-if [ -n "$PREBUILT_CORE" ]; then
-  install -m 0755 "$PREBUILT_CORE" /usr/local/libexec/totalray/singbox-core
-else
-  make -C "$INSTALL_DIR/cmd/singbox-core" build
-  install -m 0755 "$INSTALL_DIR/cmd/singbox-core/singbox-core" \
-    /usr/local/libexec/totalray/singbox-core
-fi
+install -m 0755 "$CORE_BIN" /usr/local/libexec/totalray/singbox-core
 
 install -m 0644 "$SRC_DIR/systemd/totalray.service" \
   /etc/systemd/system/totalray.service
