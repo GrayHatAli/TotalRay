@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 import subprocess
 import threading
 import time
 from collections import deque
 
+log = logging.getLogger(__name__)
 
 ERROR_PATTERNS = re.compile(
     r"(?:timeout|timed out|connection reset|closed pipe|broken pipe|"
@@ -31,6 +33,9 @@ class DegradationDetector:
         self._retransmits: deque[tuple[float, int]] = deque()
         self._bad_samples = 0
         self._active_tag = ""
+        # The journal thread feeds log lines while the monitor thread feeds
+        # connection and retransmit samples; both mutate the same deques.
+        self._lock = threading.RLock()
 
     @property
     def active_tag(self) -> str:
@@ -38,29 +43,33 @@ class DegradationDetector:
 
     def set_active_tag(self, tag: str | None) -> None:
         tag = tag or ""
-        if tag != self._active_tag:
-            self._errors.clear()
-            self._retransmits.clear()
-            self._bad_samples = 0
-        self._active_tag = tag
+        with self._lock:
+            if tag != self._active_tag:
+                self._errors.clear()
+                self._retransmits.clear()
+                self._bad_samples = 0
+            self._active_tag = tag
 
     def observe_log_line(self, line: str, now: float | None = None) -> bool:
         """Record only matching errors that explicitly mention active tag."""
         now = time.time() if now is None else now
-        if self._active_tag and self._active_tag in line and ERROR_PATTERNS.search(line):
-            self._errors.append((now, 1))
-        return self._evaluate(now)
+        with self._lock:
+            if self._active_tag and self._active_tag in line and ERROR_PATTERNS.search(line):
+                self._errors.append((now, 1))
+            return self._evaluate(now)
 
     def observe_retransmits(self, count: int, now: float | None = None) -> bool:
         now = time.time() if now is None else now
-        self._retransmits.append((now, max(0, int(count))))
-        return self._evaluate(now)
+        with self._lock:
+            self._retransmits.append((now, max(0, int(count))))
+            return self._evaluate(now)
 
     def observe_connection_errors(self, count: int, now: float | None = None) -> bool:
         now = time.time() if now is None else now
-        if count:
-            self._errors.append((now, int(count)))
-        return self._evaluate(now)
+        with self._lock:
+            if count:
+                self._errors.append((now, int(count)))
+            return self._evaluate(now)
 
     def _evaluate(self, now: float) -> bool:
         cutoff = now - self.window_seconds
@@ -75,14 +84,15 @@ class DegradationDetector:
 
     def snapshot(self, now: float | None = None) -> dict:
         now = time.time() if now is None else now
-        self._evaluate(now)
-        return {
-            "active_tag": self._active_tag,
-            "log_errors": sum(value for _, value in self._errors),
-            "retransmit_samples": [value for _, value in self._retransmits],
-            "bad_samples": self._bad_samples,
-            "degraded": self._bad_samples >= self.hysteresis_samples,
-        }
+        with self._lock:
+            self._evaluate(now)
+            return {
+                "active_tag": self._active_tag,
+                "log_errors": sum(value for _, value in self._errors),
+                "retransmit_samples": [value for _, value in self._retransmits],
+                "bad_samples": self._bad_samples,
+                "degraded": self._bad_samples >= self.hysteresis_samples,
+            }
 
 
 # ss prints one header line per socket (state, queues, local, peer, process),
@@ -185,7 +195,11 @@ class JournalTailer:
         if self.process is None or self.process.stdout is None:
             return
         for line in self.process.stdout:
-            self.callback(line.rstrip("\n"))
+            try:
+                self.callback(line.rstrip("\n"))
+            except Exception:  # noqa: BLE001
+                # One bad line must not end the passive log signal for good.
+                log.exception("journal line handler failed")
 
     def stop(self) -> None:
         if self.process is not None:

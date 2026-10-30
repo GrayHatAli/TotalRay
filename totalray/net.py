@@ -5,6 +5,7 @@ import contextlib
 import logging
 import socket
 import struct
+import threading
 
 log = logging.getLogger("totalray.net")
 
@@ -16,6 +17,11 @@ _SO_MARK = getattr(socket, "SO_MARK", 36)
 
 _real_socket = socket.socket
 _real_getaddrinfo = socket.getaddrinfo
+
+# bypass_tun() swaps process-wide socket functions, so two overlapping uses
+# (the subscription and rule-set jobs fire at the same minute every day)
+# would restore the real ones while the other is still mid-download.
+_BYPASS_LOCK = threading.RLock()
 
 
 def _marked_udp_socket(timeout: float) -> socket.socket:
@@ -148,10 +154,11 @@ def bypass_tun(dns_server: str | None = None):
                 return _real_getaddrinfo(ip, port, family, type, proto, flags)
         return _real_getaddrinfo(host, port, family, type, proto, flags)
 
-    socket.socket = _MarkedSocket
-    socket.getaddrinfo = patched_getaddrinfo
-    try:
-        yield
-    finally:
-        socket.socket = _real_socket
-        socket.getaddrinfo = _real_getaddrinfo
+    with _BYPASS_LOCK:
+        socket.socket = _MarkedSocket
+        socket.getaddrinfo = patched_getaddrinfo
+        try:
+            yield
+        finally:
+            socket.socket = _real_socket
+            socket.getaddrinfo = _real_getaddrinfo
