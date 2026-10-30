@@ -162,3 +162,23 @@ def test_valid_links_keep_the_exact_same_outbound_and_fingerprint():
                 "utls": {"enabled": True, "fingerprint": "chrome"},
                 "reality": {"enabled": True, "public_key": GOOD_KEY, "short_id": "ab"}},
     }
+
+
+def test_shadowsocks_sip002_link_with_slash_before_fragment():
+    """ss://userinfo@host:port/#tag is valid SIP002 and must parse."""
+    from totalray import parsers
+    plain = parsers.parse_link("ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388#name")
+    slashed = parsers.parse_link("ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388/#name")
+    # parse_link also returns the original link text, which differs by the "/"
+    assert {k: v for k, v in slashed.items() if k != "link"} == \
+        {k: v for k, v in plain.items() if k != "link"}
+    outbound = plain.get("outbound", plain)
+    assert outbound["server"] == "1.2.3.4"
+    assert outbound["server_port"] == 8388
+
+
+def test_shadowsocks_plugin_links_are_still_rejected():
+    import pytest
+    from totalray import parsers
+    with pytest.raises(Exception):
+        parsers.parse_link("ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388/?plugin=v2ray-plugin#n")

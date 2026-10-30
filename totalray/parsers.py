@@ -338,6 +338,9 @@ def _parse_ss(link: str):
 
     if "@" in rest:
         userinfo_raw, hostport = rest.rsplit("@", 1)
+        # SIP002 writes ss://userinfo@host:port/?plugin#tag; the "/" stays
+        # behind when there is no plugin query.
+        hostport = hostport.rstrip("/")
         userinfo = userinfo_raw if ":" in userinfo_raw else _b64str(userinfo_raw)
     else:
         decoded = _b64str(rest)
