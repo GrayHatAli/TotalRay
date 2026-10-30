@@ -20,6 +20,13 @@ from . import net
 
 log = logging.getLogger(__name__)
 
+# What rebuild_and_apply()'s message says about restarts. The apply
+# coordinator reads these through restart_attempted(), so they are defined
+# here once instead of being matched as loose text.
+NO_RESTART_MARK = "(no restart)"
+RESTART_FAILED_PREFIX = "config written but restart failed"
+RESTART_BLOCKED_MSG = "restart not allowed"
+
 DNS_IN_PORT = 1053
 REDIRECT_INPUT_MARK = net.REDIRECT_INPUT_MARK
 REDIRECT_OUTPUT_MARK = net.REDIRECT_OUTPUT_MARK
@@ -625,7 +632,20 @@ def reload_singbox(settings) -> tuple[bool, str]:
     return restart_singbox()
 
 
-def rebuild_and_apply(settings, db, force: bool = False) -> tuple[bool, str]:
+def restart_attempted(ok: bool, msg: str) -> bool:
+    """Did this rebuild_and_apply() result involve (re)starting sing-box?
+
+    Selector switches and live reconciles do not. A config that failed
+    ``sing-box check`` or a blocked restart never got that far either, so
+    neither may count against the restart circuit breaker.
+    """
+    if ok:
+        return NO_RESTART_MARK not in msg
+    return msg.startswith(RESTART_FAILED_PREFIX)
+
+
+def rebuild_and_apply(settings, db, force: bool = False,
+                      allow_restart: bool = True) -> tuple[bool, str]:
     """Apply the current pool-B state to sing-box.
 
     Most rounds, the *set* of verified servers hasn't actually changed --
@@ -638,6 +658,10 @@ def rebuild_and_apply(settings, db, force: bool = False) -> tuple[bool, str]:
     set genuinely changed (a server was promoted/demoted/removed), or when
     `force=True` is passed (e.g. after a rule-set update, where the route
     section itself changed and a restart is unavoidable).
+
+    With ``allow_restart=False`` the no-restart paths still work, but a
+    change that would need a restart returns ``RESTART_BLOCKED_MSG``
+    instead (used while the restart circuit breaker is open).
     """
     max_n = int(settings["test"]["max_in_group"])
     standby_count = int(settings["proxy_group"].get("standby_count", 0))
@@ -652,7 +676,7 @@ def rebuild_and_apply(settings, db, force: bool = False) -> tuple[bool, str]:
         ok, msg = set_active_config(settings, best_tag)
         if ok:
             log.info("active config switched to %s via Clash API (no restart)", best_tag)
-            return True, f"switched to {best_tag} (no restart)"
+            return True, f"switched to {best_tag} {NO_RESTART_MARK}"
         log.warning("clash api switch failed (%s); falling back to full rebuild", msg)
         # fall through to the full rebuild below as a safety net
 
@@ -670,14 +694,16 @@ def rebuild_and_apply(settings, db, force: bool = False) -> tuple[bool, str]:
             ok2, msg2 = set_active_config(settings, best_tag)
             if not ok2:
                 log.warning("live post-reconcile selection failed: %s", msg2)
-            return True, f"{live_result[1]} (no restart)"
+            return True, f"{live_result[1]} {NO_RESTART_MARK}"
         if live_result is not None:
             log.warning("embedded live apply unavailable (%s); falling back to full reload",
                         live_result[1])
 
+    if not allow_restart:
+        return False, RESTART_BLOCKED_MSG
     ok, msg = reload_singbox(settings)
     if not ok:
-        return False, f"config written but restart failed: {msg}"
+        return False, f"{RESTART_FAILED_PREFIX}: {msg}"
     _save_last_tags(settings, new_tags)
     _save_live_config(settings, config)
     ok2, msg2 = set_active_config(settings, best_tag)

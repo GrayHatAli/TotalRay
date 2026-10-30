@@ -156,39 +156,46 @@ class ApplyCoordinator:
         self._prune_window()
 
         # ── circuit breaker check ────────────────────────────────────
+        # An open breaker pauses *restarts* only. Selector switches and live
+        # reconciles do not restart anything, so they keep working.
+        allow_restart = True
         if self._circuit_open:
             elapsed = time.time() - (self._circuit_open_at or 0)
             if elapsed < self._window_seconds:
                 log.warning(
                     "apply coordinator: circuit breaker OPEN "
-                    "(%.0fs / %.0fs); skipping apply (reason=%s)",
+                    "(%.0fs / %.0fs); restarts paused (reason=%s)",
                     elapsed, self._window_seconds, reason)
-                return False, "circuit breaker open -- restarts paused"
-            # Window expired -- half-open: allow one attempt
-            log.info(
-                "apply coordinator: circuit half-open after %.0fs; "
-                "allowing one attempt", elapsed)
-            self._circuit_open = False
-
+                allow_restart = False
+            else:
+                # Window expired -- half-open: allow one attempt
+                log.info(
+                    "apply coordinator: circuit half-open after %.0fs; "
+                    "allowing one attempt", elapsed)
+                self._circuit_open = False
 
         # ── delegate to builder ──────────────────────────────────────
         # The tag-comparison inside builder.rebuild_and_apply decides
         # whether to do a selector-only switch (no restart) or a full
-        # rebuild + restart.  We only gate the *restart* through the
-        # circuit breaker.
+        # rebuild + restart.
         try:
             ok, msg = builder.rebuild_and_apply(
-                self.settings, self.db, force=force)
+                self.settings, self.db, force=force,
+                allow_restart=allow_restart)
         except Exception as exc:  # noqa: BLE001
             log.exception("apply coordinator: unhandled exception")
             self._record_attempt(reason, success=False)
             return False, str(exc)[:400]
 
+        if not allow_restart and msg == builder.RESTART_BLOCKED_MSG:
+            return False, "circuit breaker open -- restarts paused"
+
         # ── track result ─────────────────────────────────────────────
-        # Only count actual restarts (not selector-only switches)
-        needs_restart = "(no restart)" not in msg
-        if needs_restart:
-            self._record_attempt(reason, success=ok)
+        # Count only real restart attempts. Selector switches, live
+        # reconciles and configs rejected by ``sing-box check`` restarted
+        # nothing, so they must not push the breaker toward opening.
+        if builder.restart_attempted(ok, msg):
+            healthy = True
             if ok:
                 # Health check after a successful restart
                 healthy = _health_check(
@@ -199,11 +206,14 @@ class ApplyCoordinator:
                     log.error(
                         "apply coordinator: sing-box restarted but "
                         "health check FAILED")
-                    self._record_attempt(
-                        reason + "_health_fail", success=False)
-                    return False, (
-                        "config written and restarted but health check "
-                        "failed -- sing-box may be crash-looping")
+            # One restart is one entry, whatever the health check says.
+            self._record_attempt(
+                reason if healthy or not ok else reason + "_health_fail",
+                success=ok and healthy)
+            if ok and not healthy:
+                return False, (
+                    "config written and restarted but health check "
+                    "failed -- sing-box may be crash-looping")
         return ok, msg
 
     def _record_attempt(self, reason: str, success: bool) -> None:
