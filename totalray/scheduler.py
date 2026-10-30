@@ -32,6 +32,14 @@ class Manager:
         self._round_status_path = os.path.join(
             self.settings.data_dir, "round_status.json")
         self._round_state = RoundStateStore(self._round_status_path)
+
+    def recover_interrupted_rounds(self) -> None:
+        """Mark rounds a crashed daemon left "running" as failed.
+
+        Daemon start only. A short-lived CLI Manager (``totalray test-a``)
+        must not call this: the running daemon may be in the middle of a
+        real round, and clearing its state would let a second one start.
+        """
         self._round_state.recover()
 
     def start_live_monitor(self) -> None:
@@ -329,6 +337,7 @@ class Manager:
 
 def run_daemon(settings, db):
     manager = Manager(settings, db)
+    manager.recover_interrupted_rounds()
 
     # Start monitoring before bootstrap: bootstrap includes a potentially long
     # Pool-A test and must not leave a stale heartbeat during that work.
