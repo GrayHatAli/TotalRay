@@ -316,24 +316,6 @@ def _status_snapshot(settings, db) -> dict:
         "last_error": pb.get("last_error"),
     }
 
-    # -- devices -----------------------------------------------------------
-    devices = []
-    try:
-        devs = db.get_device_totals()
-        if not devs:
-            from .traffic import get_device_stats
-            devs = get_device_stats(settings)
-        if devs:
-            for d in devs:
-                devices.append({
-                    "ip": d.get("ip"),
-                    "last_seen": d.get("last_seen"),
-                    "rx": d.get("last_rx", d.get("download", 0)),
-                    "tx": d.get("last_tx", d.get("upload", 0)),
-                })
-    except Exception:  # noqa: BLE001
-        pass
-
     return {
         "status_line": status_line,
         "traffic": {"down": totals[0], "up": totals[1]} if totals else None,
@@ -348,7 +330,6 @@ def _status_snapshot(settings, db) -> dict:
         },
         "pool_a": pool_a,
         "pool_b": pool_b,
-        "devices": devices,
     }
 
 
@@ -704,37 +685,6 @@ def cmd_status(args):
         print("\n-- top 5 verified configs (lowest real latency) --")
         for i, row in enumerate(top, 1):
             print(f"  {i:>2}. {row['last_delay']:>5} ms  {row['name']}")
-
-    # -- connected devices (per-device traffic sampler) ---------------------
-    try:
-        devs = db.get_device_totals()
-        if not devs:
-            from .traffic import get_device_stats
-            devs = get_device_stats(settings)
-        if devs:
-            print("\n-- connected devices (syncbox) --")
-            for d in devs:
-                ip = d.get('ip')
-                last_seen = _fmt_datetime(d.get('last_seen'))
-                rx = d.get('last_rx', d.get('download', 0))
-                tx = d.get('last_tx', d.get('upload', 0))
-                try:
-                    rows2 = db.get_recent_device_log(ip, limit=1)
-                    if rows2:
-                        r = rows2[0]
-                        rxd = int(r.get('rx_delta', 0) or 0)
-                        txd = int(r.get('tx_delta', 0) or 0)
-                        sample_ts = _fmt_datetime(r.get('ts'))
-                    else:
-                        rxd = txd = 0
-                        sample_ts = '-'
-                except Exception:
-                    rxd = txd = 0
-                    sample_ts = '-'
-                print(f"  {ip}  last_seen={last_seen}  down={_human_bytes(rx)} (+{_human_bytes(rxd)})"
-                      f"  up={_human_bytes(tx)} (+{_human_bytes(txd)})  last_sample={sample_ts}")
-    except Exception:
-        pass
 
     db.close()
 

@@ -1,4 +1,4 @@
-"""SQLite storage layer for TotalRay with device traffic persistence."""
+"""SQLite storage layer for TotalRay."""
 from __future__ import annotations
 
 import json
@@ -42,26 +42,6 @@ CREATE TABLE IF NOT EXISTS test_log (
     failed  INTEGER,
     removed INTEGER
 );
-
--- Devices known to TotalRay (tracked by IP)
-CREATE TABLE IF NOT EXISTS devices (
-    ip       TEXT PRIMARY KEY,
-    last_seen TEXT,
-    last_rx  INTEGER NOT NULL DEFAULT 0,
-    last_tx  INTEGER NOT NULL DEFAULT 0
-);
-
--- Device traffic log: per-sample deltas and cumulative totals
-CREATE TABLE IF NOT EXISTS device_traffic_log (
-    id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    ip      TEXT NOT NULL,
-    ts      TEXT DEFAULT (datetime('now')),
-    rx_delta INTEGER NOT NULL DEFAULT 0,
-    tx_delta INTEGER NOT NULL DEFAULT 0,
-    rx_total INTEGER NOT NULL DEFAULT 0,
-    tx_total INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_device_traffic_ip_ts ON device_traffic_log(ip, ts);
 
 -- Monotonic membership versions and immutable test-round metadata.
 CREATE TABLE IF NOT EXISTS state_meta (
@@ -484,59 +464,6 @@ class Database:
                 " ORDER BY score ASC LIMIT ?", (limit,)).fetchall()
         return [{"name": r["name"], "pool": r["pool"], "score": r["score"]} for r in rows]
 
-    # ---------------- device traffic persistence
-    def record_device_stats(self, devices: list) -> None:
-        """Persist per-device cumulative counters and insert per-sample deltas.
-
-        `devices` is a list of dicts: {ip, upload, download} where numbers are
-        cumulative byte counters as read from nft/iptables (or best-effort).
-        """
-        with self._lock, self._conn:
-            for d in devices:
-                ip = d.get("ip")
-                upload = int(d.get("upload", 0))
-                download = int(d.get("download", 0))
-                row = self._conn.execute(
-                    "SELECT last_rx, last_tx FROM devices WHERE ip=?", (ip,)).fetchone()
-                if row is None:
-                    # new device
-                    self._conn.execute(
-                        "INSERT INTO devices(ip, last_seen, last_rx, last_tx)"
-                        " VALUES (?, datetime('now'), ?, ?)",
-                        (ip, download, upload))
-                    rx_delta = download
-                    tx_delta = upload
-                else:
-                    prev_rx = int(row["last_rx"] or 0)
-                    prev_tx = int(row["last_tx"] or 0)
-                    rx_delta = max(0, download - prev_rx)
-                    tx_delta = max(0, upload - prev_tx)
-                    self._conn.execute(
-                        "UPDATE devices SET last_seen=datetime('now'), last_rx=?, last_tx=? WHERE ip=?",
-                        (download, upload, ip))
-                if rx_delta or tx_delta:
-                    self._conn.execute(
-                        "INSERT INTO device_traffic_log(ip, rx_delta, tx_delta, rx_total, tx_total)"
-                        " VALUES (?,?,?,?,?)",
-                        (ip, rx_delta, tx_delta, download, upload))
-
-    def get_device_totals(self) -> list:
-        """Return per-device current totals and last-seen timestamp.
-
-        Returns list of dicts: {ip, last_seen, last_rx, last_tx} ordered by last_seen desc.
-        """
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT ip, last_seen, last_rx, last_tx FROM devices ORDER BY last_seen DESC").fetchall()
-        return [dict(r) for r in rows]
-
-    def get_recent_device_log(self, ip: str, limit: int = 50) -> list:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT ts, rx_delta, tx_delta, rx_total, tx_total FROM device_traffic_log"
-                " WHERE ip=? ORDER BY ts DESC LIMIT ?", (ip, limit)).fetchall()
-        return [dict(r) for r in rows]
-
     # ---------------- reporting helpers
     def stats(self) -> dict:
         with self._lock:
@@ -585,8 +512,6 @@ class Database:
              g("log_days", 30)),
             ("test_rounds_deleted", "delete", "test_rounds", "id",
              "started_at < datetime('now', ?)", g("log_days", 30)),
-            ("traffic_log_deleted", "delete", "device_traffic_log", "id",
-             "ts < datetime('now', ?)", g("traffic_log_days", 90)),
         ]
 
     def prune(self, cfg: dict | None = None, dry_run: bool = False) -> dict:

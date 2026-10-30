@@ -60,7 +60,6 @@ def _make_db(**stats_kwargs):
          "last_count": 30, "last_status": "ok", "last_update": "2025-01-01 11:00:00"},
     ]
     db.configs_health_by_sub.return_value = {1: 20, 2: 0}
-    db.get_device_totals.return_value = []
     db.top_configs.return_value = []
     db.worst_configs.return_value = []
     return db
@@ -75,7 +74,7 @@ class TestStatusSnapshot:
 
         expected_keys = {
             "status_line", "traffic", "live_monitor", "apply",
-            "subscriptions", "configs", "pool_a", "pool_b", "devices",
+            "subscriptions", "configs", "pool_a", "pool_b",
         }
         assert set(data.keys()) == expected_keys
 

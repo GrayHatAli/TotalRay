@@ -11,7 +11,6 @@ CFG = {
     "removed_ever_ok_compact_days": 30,
     "removed_ever_ok_delete_days": 90,
     "log_days": 30,
-    "traffic_log_days": 90,
     "batch_size": 5000,
 }
 HEAVY = "x" * 2000
@@ -121,19 +120,13 @@ def test_prune_trims_old_logs_only(db):
                 "INSERT INTO test_rounds(id, pool, snapshot_generation, started_at, state)"
                 " VALUES (?, 'a', 0, datetime('now', ?), 'finished')",
                 (f"r{days}", f"-{days} days"))
-        for days in (1, 120):
-            db._conn.execute(
-                "INSERT INTO device_traffic_log(ip, ts) VALUES ('10.0.0.2', datetime('now', ?))",
-                (f"-{days} days",))
 
     result = db.prune(CFG)
 
     assert result["test_log_deleted"] == 1
     assert result["test_rounds_deleted"] == 1
-    assert result["traffic_log_deleted"] == 1
     assert db._conn.execute("SELECT COUNT(*) FROM test_log").fetchone()[0] == 1
     assert db._conn.execute("SELECT id FROM test_rounds").fetchone()["id"] == "r1"
-    assert db._conn.execute("SELECT COUNT(*) FROM device_traffic_log").fetchone()[0] == 1
 
 
 def test_prune_processes_everything_across_batches(db):

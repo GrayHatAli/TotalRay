@@ -66,3 +66,20 @@ def test_running_round_has_no_finish_time(db):
         "SELECT state, finished_at FROM test_rounds WHERE id=?", (rid,)).fetchone()
     assert row["state"] == "running"
     assert row["finished_at"] is None
+
+
+def test_database_with_leftover_device_tables_still_opens(tmp_path):
+    """Existing installs keep the old (now unused) device tables; that is harmless."""
+    import sqlite3
+    path = str(tmp_path / "old.db")
+    old = sqlite3.connect(path)
+    old.executescript(
+        "CREATE TABLE devices (ip TEXT PRIMARY KEY, last_seen TEXT,"
+        " last_rx INTEGER, last_tx INTEGER);"
+        "CREATE TABLE device_traffic_log (id INTEGER PRIMARY KEY, ip TEXT, ts TEXT);"
+        "INSERT INTO devices VALUES ('10.0.0.2', datetime('now'), 1, 2);")
+    old.commit()
+    old.close()
+    database = Database(path)
+    assert database.stats()["total"] == 0
+    database.prune({})   # retention must not trip over them either

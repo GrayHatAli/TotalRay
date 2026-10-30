@@ -11,7 +11,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from . import net, rulesets, subfetch
 from .coordinator import ApplyCoordinator, REASON_MEMBERSHIP_CHANGED, REASON_RULES_UPDATED
 from .tester import GroupTester
-from . import traffic
 from .live_monitor import create_monitor
 from .round_state import RoundStateStore
 
@@ -181,15 +180,6 @@ class Manager:
         finally:
             self._rules_lock.release()
 
-    def job_sample_traffic(self):
-        try:
-            devs = traffic.get_device_stats(self.settings)
-            if devs:
-                self.db.record_device_stats(devs)
-                log.debug("sampled %d devices", len(devs))
-        except Exception:  # noqa: BLE001
-            log.exception("error sampling device traffic")
-
     # ---------------------------------------------------- core logic
     def run_pool_a_round(self, round_id: str | None = None) -> dict:
         if not self._internet_ok():
@@ -357,10 +347,6 @@ def run_daemon(settings, db):
     scheduler.add_job(manager.job_update_rules, "interval",
                       hours=int(sch["rules_update_hours"]),
                       id="rules", max_instances=1, coalesce=True)
-    # traffic sampler (best-effort): sample every N seconds (default 60)
-    scheduler.add_job(manager.job_sample_traffic, "interval",
-                      seconds=int(sch.get("traffic_sample_seconds", 60)),
-                      id="traffic", max_instances=1, coalesce=True)
     # DB retention: prune daily, VACUUM weekly (first runs one interval after
     # start, so they never compete with the bootstrap test round).
     ret = settings["retention"]

@@ -15,7 +15,6 @@ DEFAULTS: dict = {
         "rules_update_hours": 24,
         "pool_a_max_items_per_round": 0,
         "pool_a_retry_backoff_minutes": 0,
-        "traffic_sample_seconds": 60,
     },
     "retention": {
         # Soft-deleted configs (removed=1) are never tested or revived again;
@@ -30,7 +29,6 @@ DEFAULTS: dict = {
         "removed_ever_ok_compact_days": 30,
         "removed_ever_ok_delete_days": 90,
         "log_days": 30,
-        "traffic_log_days": 90,
         "batch_size": 5000,
     },
     "test": {
