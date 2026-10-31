@@ -64,13 +64,6 @@ class DegradationDetector:
             self._retransmits.append((now, max(0, int(count))))
             return self._evaluate(now)
 
-    def observe_connection_errors(self, count: int, now: float | None = None) -> bool:
-        now = time.time() if now is None else now
-        with self._lock:
-            if count:
-                self._errors.append((now, int(count)))
-            return self._evaluate(now)
-
     def _evaluate(self, now: float) -> bool:
         cutoff = now - self.window_seconds
         while self._errors and self._errors[0][0] < cutoff:

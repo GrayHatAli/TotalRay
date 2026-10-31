@@ -1,8 +1,8 @@
-"""Live connection monitor for TotalRay with automatic failover.
+"""Live monitor for TotalRay: passive degradation signals and failover.
 
-This module provides real-time monitoring of active connections through
-the currently selected sing-box outbound, detecting packet drops and
-connection failures, and triggering immediate failover to backup servers.
+Watches the currently selected sing-box outbound, detects degradation
+from the sing-box log and TCP retransmits, and fails over to a ready
+standby server.
 """
 from __future__ import annotations
 
@@ -12,8 +12,6 @@ import os
 import tempfile
 import threading
 import time
-from collections import deque
-from dataclasses import dataclass, field
 from typing import Callable
 
 import requests
@@ -25,63 +23,18 @@ from .standby_probe import StandbyProbe
 log = logging.getLogger(__name__)
 
 
-@dataclass
-class ConnectionSample:
-    """A single sample of connection quality metrics."""
-    timestamp: float
-    download_speed: int  # bytes/sec
-    upload_speed: int  # bytes/sec
-    active_connections: int
-    errors: int = 0
-
-
-@dataclass
-class QualityWindow:
-    """Sliding window of connection quality samples."""
-    samples: deque = field(default_factory=lambda: deque(maxlen=10))
-    error_count: int = 0
-    last_error_time: float = 0.0
-
-    def add_sample(self, sample: ConnectionSample) -> None:
-        self.samples.append(sample)
-        if sample.errors > 0:
-            self.error_count += sample.errors
-            self.last_error_time = sample.timestamp
-        # Clean old errors (older than 30 seconds)
-        cutoff = time.time() - 30
-        while self.samples and self.samples[0].timestamp < cutoff:
-            old_sample = self.samples.popleft()
-            if old_sample.timestamp < cutoff and old_sample.errors > 0:
-                self.error_count = max(0, self.error_count - old_sample.errors)
-
-    def add_error(self) -> None:
-        self.error_count += 1
-        self.last_error_time = time.time()
-
-    def get_recent_errors(self, window_seconds: float = 10) -> int:
-        """Count errors in the last N seconds."""
-        if not self.samples:
-            return 0
-        cutoff = time.time() - window_seconds
-        return sum(1 for s in self.samples if s.timestamp > cutoff and s.errors > 0)
-
-    def is_degraded(self, threshold: int = 3) -> bool:
-        """Check if connection quality is degraded based on recent errors."""
-        recent_errors = self.get_recent_errors(10)
-        return recent_errors >= threshold
-
-
 class LiveMonitor:
     """Monitor live connection quality and trigger failover on degradation.
 
-    This runs continuously in the background, polling the Clash API for
-    connection statistics and detecting issues like:
-    - Sudden drops in throughput during active streaming
-    - Connection timeouts or failures
-    - Packet loss indicators
+    This runs continuously in the background and watches the active
+    outbound through two passive signals (no probe traffic on live
+    connections):
+    - error lines for the active server in the sing-box log
+    - TCP retransmit growth on the tunnel's own sockets
 
-    When degradation is detected, it immediately switches to the next
-    best server in the verified pool (pool-B).
+    It also probes the standby servers through the Clash API. When the
+    active server degrades it switches to the best ready standby (or only
+    logs the decision while ``shadow_mode`` is on).
     """
 
     def __init__(
@@ -118,10 +71,8 @@ class LiveMonitor:
 
         self._running = False
         self._thread: threading.Thread | None = None
-        self._quality = QualityWindow()
         self._last_failover = 0.0
         self._failover_count = 0
-        self._consecutive_errors = 0
         self._on_failover: Callable[[str], None] | None = None
         self._started_at = 0.0
         self._last_status_write = 0.0
@@ -161,7 +112,6 @@ class LiveMonitor:
             "last_check": now,
             "failover_count": self._failover_count,
             "last_failover": self._last_failover or None,
-            "consecutive_errors": self._consecutive_errors,
             "check_interval": self.check_interval,
             "passive_signal": self._signal.snapshot(),
             "standbys": self._probe.snapshot(),
@@ -234,64 +184,6 @@ class LiveMonitor:
             "all": auto_proxy.get("all", []),
         }
 
-    def _get_connections(self) -> list | None:
-        """Get active connections from Clash API."""
-        data = self._api_get("/connections")
-        if not data:
-            return None
-        return data.get("connections", [])
-
-    def _check_connection_health(self) -> tuple[bool, int]:
-        """Check if current connection is healthy.
-
-        Returns:
-            Tuple of (is_healthy, error_count)
-        """
-        connections = self._get_connections()
-        if connections is None:
-            # API unavailable, don't count as error
-            return True, 0
-
-        now = time.time()
-        error_count = 0
-        active_count = len(connections)
-        total_download = 0
-        total_upload = 0
-
-        # /connections lists only connections that are still open, so a
-        # connection that is under a second old is a NEW connection, not a
-        # failed one: a normal page load opens several at once. This list
-        # cannot tell us about errors; the sing-box log and the retransmit
-        # sampler do that. Here we only collect the throughput numbers.
-        for conn in connections[-50:]:
-            download = conn.get("download", 0) or 0
-            upload = conn.get("upload", 0) or 0
-            total_download += download
-            total_upload += upload
-            
-
-        # Create sample with computed metrics
-        sample = ConnectionSample(
-            timestamp=now,
-            download_speed=total_download // max(1, active_count),
-            upload_speed=total_upload // max(1, active_count),
-            active_connections=active_count,
-            errors=error_count,
-        )
-        self._quality.add_sample(sample)
-
-        if error_count > 0:
-            self._quality.add_error()
-            self._consecutive_errors += 1
-        else:
-            self._consecutive_errors = max(0, self._consecutive_errors - 1)
-
-        # Use configurable threshold for degradation detection
-        threshold = self.error_threshold
-        passive_degraded = self._signal.observe_connection_errors(error_count, now)
-        is_healthy = not (self._quality.is_degraded(threshold) and passive_degraded)
-        return is_healthy, error_count
-
     def _probe_standbys(self, active_tag: str) -> None:
         for cfg in self.db.get_pool_configs("b", max_n=10):
             tag = f"cfg-{cfg['id']}"
@@ -303,19 +195,6 @@ class LiveMonitor:
             return
         self._last_retransmit_sample = now
         self._signal.observe_retransmits(self._retransmit_sampler.sample(), now)
-
-    def _get_next_best_server(self, current_tag: str) -> str | None:
-        """Get the next best server from pool-B, excluding current."""
-        configs = self.db.get_pool_configs("b", max_n=10)
-        for cfg in configs:
-            cfg_tag = f"cfg-{cfg['id']}"
-            if cfg_tag == current_tag:
-                continue
-            # Skip if this config has poor recent performance
-            if cfg.get("delay") and (cfg["delay"] <= 0 or cfg["delay"] > 2000):
-                continue
-            return cfg_tag
-        return None
 
     def _do_failover(self, new_tag: str) -> tuple[bool, str]:
         """Switch to a new server via Clash API.
@@ -329,8 +208,6 @@ class LiveMonitor:
             now = time.time()
             self._last_failover = now
             self._failover_count += 1
-            self._quality = QualityWindow()  # Reset quality tracking
-            self._consecutive_errors = 0
             log.warning(
                 "LIVE FAILOVER: switched from previous server to %s "
                 "(failover #%d)",
@@ -377,11 +254,10 @@ class LiveMonitor:
                     self._last_probe = now
                     self._probe_standbys(current_tag)
 
-                # Check connection health
-                is_healthy, errors = self._check_connection_health()
-
-                signal_degraded = self._signal.snapshot().get("degraded", False)
-                if not is_healthy or signal_degraded:
+                # Degradation comes from the sing-box log and the retransmit
+                # sampler (both feed self._signal); the open-connection list
+                # cannot tell a failed connection from a new one.
+                if self._signal.snapshot().get("degraded", False):
                     self._last_degraded_tag = current_tag
                     ready = self._probe.ready(
                         [f"cfg-{cfg['id']}" for cfg in self.db.get_pool_configs("b", max_n=10)

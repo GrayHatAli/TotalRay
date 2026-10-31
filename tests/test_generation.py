@@ -11,7 +11,7 @@ def _add_config(db: Database, fingerprint: str = "fp") -> int:
         "link": "link",
         "outbound": {"type": "direct"},
     }])
-    return db.get_pool_candidates("a")[0]["id"]
+    return db.get_pool_snapshot("a")["configs"][0]["id"]
 
 
 def test_pool_generation_changes_on_import_and_stale_result_is_recorded(tmp_path):

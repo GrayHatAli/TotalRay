@@ -43,9 +43,6 @@ DEFAULTS: dict = {
         "chunk_size": 96,
     },
     "proxy_group": {
-        "urltest_interval": "3m",
-        "urltest_tolerance": 50,
-        "idle_timeout": "30m",
         # Number of live pool-B outbounds kept in the selector. The first is
         # active and the remaining entries are warm standbys.
         "standby_count": 3,

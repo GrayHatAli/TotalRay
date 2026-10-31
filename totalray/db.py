@@ -422,32 +422,6 @@ class Database:
                  "outbound": json.loads(r["outbound"]),
                  "delay": r["last_delay"]} for r in rows]
 
-    def get_pool_candidates(self, pool: str, max_n: int = 0) -> list:
-        """All non-removed configs in this pool, for the purpose of
-        picking who gets (re)tested this round.
-
-        This is deliberately NOT the same query as get_pool_configs():
-        that one only returns entries with a valid positive last_delay
-        (right for building the live sing-box group from known-good pool
-        B members), which silently excludes anything whose last test was
-        a hard failure (last_delay == -1, not NULL and not > 0). Reusing
-        it here meant a config that ever timed out fell into a gap it
-        could never leave - never retested, never promoted, never scored
-        down to removal. Candidate selection must include every
-        non-removed row in the pool, full stop.
-        """
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT id, name, outbound, last_delay FROM configs"
-                " WHERE removed=0 AND pool=?"
-                " ORDER BY last_test_at IS NOT NULL, last_test_at",
-                (pool,)).fetchall()
-        if max_n and max_n > 0:
-            rows = rows[:max_n]
-        return [{"id": r["id"], "name": r["name"],
-                 "outbound": json.loads(r["outbound"]),
-                 "delay": r["last_delay"]} for r in rows]
-
     def top_configs(self, limit: int = 10) -> list:
         with self._lock:
             rows = self._conn.execute(

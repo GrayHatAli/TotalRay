@@ -270,10 +270,9 @@ to forward through yet.
 | | `fail_threshold` | Score at which a config is permanently removed |
 | | `pool_b_demote_grace` | Consecutive failures before leaving pool B |
 | | `chunk_size` | Configs per temporary test sing-box instance - lower this on low-RAM boards (Pi 2/3/Zero, small VPS) |
-| `proxy_group` | `urltest_interval`/`urltest_tolerance` | Legacy compatibility fields; TotalRay owns probing and selection |
-| | `standby_count` | Active plus warm standbys kept registered by the embedded core |
+| `proxy_group` | `standby_count` | Active plus warm standbys kept registered by the embedded core |
 | `live_monitor` | `enabled` | Real-time failover on packet drops, independent of pool-B rounds |
-| | `check_interval_seconds` | How often the active connection's health is polled (default 2s) |
+| | `check_interval_seconds` | How often the active outbound is checked (default 2s) |
 | | `error_threshold` | Errors within a 10s window that trigger an immediate failover (default 3) |
 | | `cooldown_seconds` | Minimum time between live-monitor failovers (default 60s) |
 | | `shadow_mode` | Log failover recommendations without acting until rollout is validated |

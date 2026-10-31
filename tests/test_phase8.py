@@ -75,10 +75,10 @@ class TestPoolAPromotion:
         assert stats["ok"] == 0
         assert stats["failed"] == 1
 
-        # Config should still be in pool A (get_pool_candidates includes
+        # Config should still be in pool A (get_pool_snapshot includes
         # failed configs with last_delay=-1; get_pool_configs excludes them
         # because they're not suitable for the live sing-box group)
-        candidates = db.get_pool_candidates("a")
+        candidates = db.get_pool_snapshot("a")["configs"]
         assert len(candidates) == 1
         assert candidates[0]["id"] == cid
 
@@ -111,8 +111,8 @@ class TestPoolBDemotionGrace:
         assert stats["failed"] == 1
 
         # Config should still be in pool B (grace threshold not reached)
-        # Use get_pool_candidates which includes last_delay=-1 entries
-        candidates = db.get_pool_candidates("b")
+        # Use get_pool_snapshot which includes last_delay=-1 entries
+        candidates = db.get_pool_snapshot("b")["configs"]
         assert len(candidates) == 1
         assert candidates[0]["id"] == cid
 
@@ -128,12 +128,12 @@ class TestPoolBDemotionGrace:
                                  fail_threshold=-5, demote_grace=2)
 
         # Config should now be in pool A
-        candidates_a = db.get_pool_candidates("a")
+        candidates_a = db.get_pool_snapshot("a")["configs"]
         assert len(candidates_a) == 1
         assert candidates_a[0]["id"] == cid
 
         # Pool B should be empty of this config
-        candidates_b = db.get_pool_candidates("b")
+        candidates_b = db.get_pool_snapshot("b")["configs"]
         assert len(candidates_b) == 0
 
     def test_passing_result_resets_score(self, tmp_path):
