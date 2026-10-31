@@ -244,10 +244,26 @@ def _read_apply_state(settings) -> dict | None:
         return None
 
 
+def _pool_snapshot(count: int, last_round, state: dict | None) -> dict:
+    """One pool's section of the status snapshot (same shape for A and B)."""
+    state = state or {}
+    return {
+        "count": count,
+        "last_round": last_round,
+        "state": state.get("state", "idle"),
+        "round_id": state.get("round_id"),
+        "snapshot_generation": state.get("snapshot_generation"),
+        "items_total": state.get("items_total"),
+        "items_processed": state.get("items_processed"),
+        "items_ok": state.get("items_ok"),
+        "items_failed": state.get("items_failed"),
+        "last_error": state.get("last_error"),
+    }
+
+
 def _status_snapshot(settings, db) -> dict:
     """Collect every status section into a single dict for --json output."""
     stats = db.stats()
-    sched = settings["schedule"]
     round_status = _read_round_status(settings)
     apply_state = _read_apply_state(settings)
     lm = _read_live_monitor_status(settings)
@@ -270,7 +286,6 @@ def _status_snapshot(settings, db) -> dict:
 
     # -- subscriptions -----------------------------------------------------
     subs = db.list_subscriptions()
-    sub_minutes = int(sched.get("sub_update_minutes", 30))
     health_by_sub = db.configs_health_by_sub()
     sub_list = []
     for sub in subs:
@@ -286,35 +301,10 @@ def _status_snapshot(settings, db) -> dict:
             "round_id": rs.get("round_id"),
         })
 
-    # -- pool A ------------------------------------------------------------
-    pa = round_status.get("pool_a") or {}
-    pool_a = {
-        "count": stats["pool_a"],
-        "last_round": stats["last_test_a"],
-        "state": pa.get("state", "idle"),
-        "round_id": pa.get("round_id"),
-        "snapshot_generation": pa.get("snapshot_generation"),
-        "items_total": pa.get("items_total"),
-        "items_processed": pa.get("items_processed"),
-        "items_ok": pa.get("items_ok"),
-        "items_failed": pa.get("items_failed"),
-        "last_error": pa.get("last_error"),
-    }
-
-    # -- pool B ------------------------------------------------------------
-    pb = round_status.get("pool_b") or {}
-    pool_b = {
-        "count": stats["pool_b"],
-        "last_round": stats["last_test_b"],
-        "state": pb.get("state", "idle"),
-        "round_id": pb.get("round_id"),
-        "snapshot_generation": pb.get("snapshot_generation"),
-        "items_total": pb.get("items_total"),
-        "items_processed": pb.get("items_processed"),
-        "items_ok": pb.get("items_ok"),
-        "items_failed": pb.get("items_failed"),
-        "last_error": pb.get("last_error"),
-    }
+    pool_a = _pool_snapshot(stats["pool_a"], stats["last_test_a"],
+                            round_status.get("pool_a"))
+    pool_b = _pool_snapshot(stats["pool_b"], stats["last_test_b"],
+                            round_status.get("pool_b"))
 
     return {
         "status_line": status_line,
@@ -522,6 +512,35 @@ def _live_connection_status(settings, db) -> str:
             f" could not resolve server address to confirm)")
 
 
+def _print_pool_round(round_status: dict, kind: str, last, minutes: int,
+                      columns: list, empty_message: str) -> None:
+    """Print one pool's round table (identical layout for pool A and B).
+
+    ``columns`` is ``[(header, key in the last test_log row), ...]``.
+    """
+    state = round_status.get(kind) or {}
+    # Show live round state even when the database has no finished round yet
+    # (e.g. the first-ever round is still running).
+    if not (last or state.get("state")):
+        print(empty_message)
+        return
+    last_ts = last["ts"] if last else None
+    last_display, next_display = _round_display(
+        round_status, kind, _fmt_hhmm(last_ts), _next_round(last_ts, minutes))
+    row = [last[key] if last else "-" for _, key in columns]
+    print(_fmt_table([header for header, _ in columns] + ["Last Round", "Next Round"],
+                     [row + [last_display, next_display]]))
+    gen = state.get("snapshot_generation")
+    rid = state.get("round_id")
+    if gen is not None or rid:
+        parts = []
+        if gen is not None:
+            parts.append(f"generation={gen}")
+        if rid:
+            parts.append(f"round={rid}")
+        print(f"  {', '.join(parts)}")
+
+
 def cmd_status(args):
     settings, db = _load(args)
 
@@ -623,31 +642,10 @@ def cmd_status(args):
     # -- Pool A -------------------------------------------------------------
     print()
     print(_title_bar("Pool A"))
-    pool_a_minutes = int(sched.get("pool_a_test_minutes", 15))
-    pa = round_status.get("pool_a") or {}
-    # Show live round state even when the database has no finished round yet
-    # (e.g. the first-ever round is still running).
-    if last_a or pa.get("state"):
-        last_a_ts = last_a["ts"] if last_a else None
-        last_display, next_display = _round_display(
-            round_status, "pool_a", _fmt_hhmm(last_a_ts),
-            _next_round(last_a_ts, pool_a_minutes))
-        rows_a = [[last_a["total"] if last_a else "-",
-                   last_a["ok"] if last_a else "-",
-                   last_a["removed"] if last_a else "-",
-                   last_display, next_display]]
-        print(_fmt_table(["Total", "Promoted", "Removed", "Last Round", "Next Round"], rows_a))
-        gen = pa.get("snapshot_generation")
-        rid = pa.get("round_id")
-        if gen is not None or rid:
-            parts = []
-            if gen is not None:
-                parts.append(f"generation={gen}")
-            if rid:
-                parts.append(f"round={rid}")
-            print(f"  {', '.join(parts)}")
-    else:
-        print("  (no pool-A test rounds yet)")
+    _print_pool_round(
+        round_status, "pool_a", last_a, int(sched.get("pool_a_test_minutes", 15)),
+        [("Total", "total"), ("Promoted", "ok"), ("Removed", "removed")],
+        "  (no pool-A test rounds yet)")
     worst = db.worst_configs(5)
     if worst:
         print("\n-- close to removal --")
@@ -657,29 +655,10 @@ def cmd_status(args):
     # -- Pool B -------------------------------------------------------------
     print()
     print(_title_bar("Pool B"))
-    pool_b_minutes = int(sched.get("pool_b_test_minutes", 3))
-    pb = round_status.get("pool_b") or {}
-    if last_b or pb.get("state"):
-        last_b_ts = last_b["ts"] if last_b else None
-        last_display, next_display = _round_display(
-            round_status, "pool_b", _fmt_hhmm(last_b_ts),
-            _next_round(last_b_ts, pool_b_minutes))
-        rows_b = [[last_b["total"] if last_b else "-",
-                   last_b["ok"] if last_b else "-",
-                   last_b["failed"] if last_b else "-",
-                   last_display, next_display]]
-        print(_fmt_table(["Total", "Healthy", "Demoted", "Last Round", "Next Round"], rows_b))
-        gen = pb.get("snapshot_generation")
-        rid = pb.get("round_id")
-        if gen is not None or rid:
-            parts = []
-            if gen is not None:
-                parts.append(f"generation={gen}")
-            if rid:
-                parts.append(f"round={rid}")
-            print(f"  {', '.join(parts)}")
-    else:
-        print("  (no pool-B test rounds yet)")
+    _print_pool_round(
+        round_status, "pool_b", last_b, int(sched.get("pool_b_test_minutes", 3)),
+        [("Total", "total"), ("Healthy", "ok"), ("Demoted", "failed")],
+        "  (no pool-B test rounds yet)")
     top = db.top_configs(5)
     if top:
         print("\n-- top 5 verified configs (lowest real latency) --")

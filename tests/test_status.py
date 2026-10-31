@@ -230,3 +230,32 @@ class TestStatusSnapshot:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestPoolSections:
+    """Pool A and pool B share one snapshot helper and one table printer."""
+
+    def test_pool_snapshot_has_the_same_shape_for_both_pools(self):
+        from totalray.main import _pool_snapshot
+        a = _pool_snapshot(3, {"ts": "x"}, {"state": "running", "round_id": "r1"})
+        b = _pool_snapshot(0, None, None)
+        assert a.keys() == b.keys()
+        assert a["state"] == "running" and a["round_id"] == "r1" and a["count"] == 3
+        assert b["state"] == "idle" and b["last_round"] is None
+
+    def test_round_table_prints_columns_and_generation(self, capsys):
+        from totalray.main import _print_pool_round
+        last = {"ts": "2026-10-31 10:00:00", "total": 7, "ok": 2, "failed": 5}
+        round_status = {"pool_b": {"snapshot_generation": 4, "round_id": "r9"}}
+        _print_pool_round(round_status, "pool_b", last, 3,
+                          [("Total", "total"), ("Healthy", "ok"), ("Demoted", "failed")],
+                          "(none)")
+        out = capsys.readouterr().out
+        assert "Healthy" in out and "Demoted" in out
+        assert "generation=4, round=r9" in out
+
+    def test_round_table_says_so_when_there_are_no_rounds(self, capsys):
+        from totalray.main import _print_pool_round
+        _print_pool_round({}, "pool_a", None, 15, [("Total", "total")],
+                          "  (no pool-A test rounds yet)")
+        assert capsys.readouterr().out.strip() == "(no pool-A test rounds yet)"
