@@ -357,6 +357,8 @@ an actual switch, plus background refill of the vacated slot.
 - [ ] End-to-end test: simulate degradation (via `tc netem`) on the active
       outbound in a test environment, confirm switch-over, confirm background
       refill, confirm the circuit breaker trips on repeated failure.
+      Script: `scripts/netem_failover_test.sh` (`preflight`, `switch`,
+      `breaker`, `all`). Check this box only after a run passes on the Pi.
 
 ## Acceptance Criteria
 
