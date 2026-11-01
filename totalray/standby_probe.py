@@ -54,6 +54,13 @@ class StandbyProbe:
                 result.last_error = None
         return result
 
+    def keep_only(self, tags) -> None:
+        """Forget servers that are no longer in the group, so the table stays small."""
+        keep = set(tags)
+        with self._lock:
+            for tag in [t for t in self._results if t not in keep]:
+                del self._results[tag]
+
     def ready(self, tags: list[str], now: float | None = None) -> list[ProbeResult]:
         now = time.time() if now is None else now
         with self._lock:

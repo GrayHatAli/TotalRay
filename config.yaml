@@ -60,7 +60,11 @@ live_monitor:
   cooldown_seconds: 60.0      # minimum time between failovers (prevents rapid switching)
   hysteresis_samples: 3       # consecutive bad samples before a recommendation
   error_window_seconds: 10.0
-  retransmit_threshold: 3
+  # Retransmits count only as a share of what was sent (a busy link always
+  # retransmits a few). Over the error window, on the ACTIVE server's sockets:
+  retransmit_threshold: 10      # at least this many segments retransmitted ...
+  retransmit_min_segments: 100  # ... out of at least this many sent ...
+  retransmit_ratio: 0.15        # ... and at least this share of them (15%)
   retransmit_sample_seconds: 5.0
   probe_interval_seconds: 7.0
   probe_timeout_seconds: 5.0

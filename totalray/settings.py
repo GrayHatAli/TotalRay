@@ -61,7 +61,9 @@ DEFAULTS: dict = {
         "cooldown_seconds": 60.0,  # Minimum time between failovers
         "hysteresis_samples": 3,
         "error_window_seconds": 10.0,
-        "retransmit_threshold": 3,
+        "retransmit_threshold": 10,
+        "retransmit_ratio": 0.15,
+        "retransmit_min_segments": 100,
         "retransmit_sample_seconds": 5.0,
         "probe_interval_seconds": 7.0,
         "probe_timeout_seconds": 5.0,

@@ -28,7 +28,7 @@ def test_concurrent_observers_do_not_corrupt_the_detector():
         try:
             for _ in range(5000):
                 t += 1.0
-                detector.observe_retransmits(0, now=t)
+                detector.observe_retransmits(0, 0, now=t)
                 detector.snapshot(now=t)
         except BaseException as exc:  # noqa: BLE001
             failures.append(exc)

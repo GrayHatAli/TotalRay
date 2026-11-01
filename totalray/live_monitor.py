@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
 import tempfile
 import threading
 import time
@@ -17,7 +18,8 @@ from typing import Callable
 import requests
 
 from .failover import FailoverController
-from .health_signal import DegradationDetector, JournalTailer, RetransmitSampler
+from .health_signal import (
+    DegradationDetector, JournalTailer, RetransmitSampler, normalize_ips)
 from .standby_probe import StandbyProbe
 
 log = logging.getLogger(__name__)
@@ -46,7 +48,9 @@ class LiveMonitor:
         cooldown_seconds: float = 60.0,
         hysteresis_samples: int = 3,
         error_window_seconds: float = 10.0,
-        retransmit_threshold: int = 3,
+        retransmit_threshold: int = 10,
+        retransmit_ratio: float = 0.15,
+        retransmit_min_segments: int = 100,
         retransmit_sample_seconds: float = 5.0,
         probe_interval_seconds: float = 7.0,
         probe_timeout_seconds: float = 5.0,
@@ -81,11 +85,14 @@ class LiveMonitor:
         self._signal = DegradationDetector(
             error_threshold=error_threshold,
             retransmit_threshold=retransmit_threshold,
+            retransmit_ratio=retransmit_ratio,
+            retransmit_min_segments=retransmit_min_segments,
             window_seconds=error_window_seconds,
             hysteresis_samples=hysteresis_samples,
         )
         self._retransmit_sampler = RetransmitSampler()
         self._last_retransmit_sample = 0.0
+        self._server_ips: tuple[str, float, set[str] | None] | None = None
         self._last_probe = 0.0
         self._probe = StandbyProbe(
             self._clash_host, self._clash_secret,
@@ -184,17 +191,47 @@ class LiveMonitor:
             "all": auto_proxy.get("all", []),
         }
 
-    def _probe_standbys(self, active_tag: str) -> None:
-        for cfg in self.db.get_pool_configs("b", max_n=10):
-            tag = f"cfg-{cfg['id']}"
+    def _probe_standbys(self, active_tag: str, group_tags: list[str]) -> None:
+        """Probe the standbys that actually exist in the running group."""
+        self._probe.keep_only(group_tags)
+        for tag in group_tags:
             if tag != active_tag:
                 self._probe.probe(tag)
+
+    def _active_server_ips(self, tag: str) -> set[str] | None:
+        """IPs of the active server (None: unknown, measure every tunnel socket)."""
+        now = time.time()
+        cached = self._server_ips
+        if cached and cached[0] == tag and now - cached[1] < (300 if cached[2] else 20):
+            return cached[2]
+        ips = self._resolve_server(tag)
+        self._server_ips = (tag, now, ips)
+        return ips
+
+    def _resolve_server(self, tag: str) -> set[str] | None:
+        try:
+            path = self.settings.data["paths"]["sing_box_config"]
+            with open(path, encoding="utf-8") as fh:
+                outbounds = json.load(fh).get("outbounds", [])
+            host = next(o["server"] for o in outbounds if o.get("tag") == tag)
+        except (OSError, ValueError, KeyError, StopIteration, TypeError):
+            return None
+        literal = normalize_ips([host])
+        if literal:
+            return literal
+        try:
+            infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        except OSError:
+            return None
+        return normalize_ips(info[4][0] for info in infos) or None
 
     def _sample_retransmits(self, now: float) -> None:
         if now - self._last_retransmit_sample < self.retransmit_sample_seconds:
             return
         self._last_retransmit_sample = now
-        self._signal.observe_retransmits(self._retransmit_sampler.sample(), now)
+        peers = self._active_server_ips(self._signal.active_tag)
+        sample = self._retransmit_sampler.sample(peers)
+        self._signal.observe_retransmits(sample.retransmits, sample.segments, now)
 
     def _do_failover(self, new_tag: str) -> tuple[bool, str]:
         """Switch to a new server via Clash API.
@@ -243,6 +280,7 @@ class LiveMonitor:
                     continue
 
                 current_tag = proxy_info.get("now")
+                group_tags = list(proxy_info.get("all") or [])
                 if not current_tag:
                     time.sleep(self.check_interval)
                     continue
@@ -252,7 +290,7 @@ class LiveMonitor:
                 self._sample_retransmits(now)
                 if now - self._last_probe >= self.probe_interval_seconds:
                     self._last_probe = now
-                    self._probe_standbys(current_tag)
+                    self._probe_standbys(current_tag, group_tags)
 
                 # Degradation comes from the sing-box log and the retransmit
                 # sampler (both feed self._signal); the open-connection list
@@ -260,8 +298,7 @@ class LiveMonitor:
                 if self._signal.snapshot().get("degraded", False):
                     self._last_degraded_tag = current_tag
                     ready = self._probe.ready(
-                        [f"cfg-{cfg['id']}" for cfg in self.db.get_pool_configs("b", max_n=10)
-                         if f"cfg-{cfg['id']}" != current_tag])
+                        [tag for tag in group_tags if tag != current_tag])
                     ok, message = self._failover.attempt(current_tag, ready)
                     if ok:
                         log.warning("automatic failover completed: %s", message)
@@ -314,7 +351,9 @@ def create_monitor(settings, db) -> LiveMonitor:
         cooldown_seconds=float(lm_cfg.get("cooldown_seconds", 60.0)),
         hysteresis_samples=int(lm_cfg.get("hysteresis_samples", 3)),
         error_window_seconds=float(lm_cfg.get("error_window_seconds", 10.0)),
-        retransmit_threshold=int(lm_cfg.get("retransmit_threshold", 3)),
+        retransmit_threshold=int(lm_cfg.get("retransmit_threshold", 10)),
+        retransmit_ratio=float(lm_cfg.get("retransmit_ratio", 0.15)),
+        retransmit_min_segments=int(lm_cfg.get("retransmit_min_segments", 100)),
         retransmit_sample_seconds=float(lm_cfg.get("retransmit_sample_seconds", 5.0)),
         probe_interval_seconds=float(lm_cfg.get("probe_interval_seconds", 7.0)),
         probe_timeout_seconds=float(lm_cfg.get("probe_timeout_seconds", 5.0)),
