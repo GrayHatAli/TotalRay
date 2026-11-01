@@ -22,9 +22,9 @@
 # Ctrl-C, and by a watchdog after MAX_IMPAIR seconds even if this script dies.
 #
 # Traffic: the passive signals need traffic through the active server. By
-# default the script generates it through the local LAN proxy (lan_proxy in
-# config.yaml). With LOAD=manual it does not, and you start a download on a
-# LAN device yourself.
+# default the script generates it through the loopback proxy (local_proxy in
+# config.yaml, no password). With LOAD=manual it does not, and you start a
+# download on a LAN device yourself.
 #
 # Tunables (environment): NETEM_PROFILE, MAX_IMPAIR, WAIT_SWITCH, WAIT_REFILL,
 # BASELINE_SECONDS, LOAD, LOAD_STREAMS, LOAD_URL, TOTALRAY_CONFIG, FORCE.
@@ -161,23 +161,18 @@ start_load() {
     info "LOAD=manual: start a download on a LAN device now and keep it running"
     return
   fi
-  [ "$(cfg lan_proxy.enabled false)" = "true" ] || die "lan_proxy is off; set LOAD=manual and generate traffic yourself"
-  local port user pass i
-  port="$(cfg lan_proxy.port 2081)"
-  user="$(cfg lan_proxy.username)"
-  pass="$(cfg lan_proxy.password)"
+  local port i
+  port="$(cfg local_proxy.port 2080)"
   LOAD_FLAG="$(mktemp)"
   for i in $(seq 1 "$LOAD_STREAMS"); do
     (
       while [ -e "$LOAD_FLAG" ]; do
-        # credentials via stdin so they do not show up in `ps`
-        printf 'proxy = "socks5h://127.0.0.1:%s"\nproxy-user = "%s:%s"\n' "$port" "$user" "$pass" |
-          curl -s -o /dev/null -m 25 -K - "$LOAD_URL" || true
+        curl -s -o /dev/null -m 25 -x "socks5h://127.0.0.1:$port" "$LOAD_URL" || true
       done
     ) &
     LOAD_PIDS+=($!)
   done
-  info "load: $LOAD_STREAMS parallel downloads through the LAN proxy"
+  info "load: $LOAD_STREAMS parallel downloads through the loopback proxy (port $port)"
 }
 
 stop_load() {
@@ -240,6 +235,11 @@ preflight() {
   info "active outbound: $ACTIVE"
   local signal_tag
   signal_tag="$(lm '.passive_signal.active_tag')"
+  if [ "$signal_tag" != "$ACTIVE" ]; then   # the status file is a few seconds old
+    sleep 12
+    ACTIVE="$(active_tag)"
+    signal_tag="$(lm '.passive_signal.active_tag')"
+  fi
   [ "$signal_tag" = "$ACTIVE" ] && ok "monitor watches the active outbound" || bad "monitor watches '$signal_tag', Clash says '$ACTIVE'"
 
   SERVER="$(server_of "$ACTIVE")"
