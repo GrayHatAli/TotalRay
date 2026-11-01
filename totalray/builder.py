@@ -644,6 +644,35 @@ def restart_attempted(ok: bool, msg: str) -> bool:
     return msg.startswith(RESTART_FAILED_PREFIX)
 
 
+def _cfg_tag(item: dict) -> str:
+    return f"cfg-{item['id']}"
+
+
+def select_group(db, max_n: int, current_tags: set[str], active_tag: str | None,
+                 excluded: frozenset[str] | set[str] = frozenset()) -> list[dict]:
+    """Choose the live group with as little churn as possible.
+
+    The group used to be "the N lowest-latency verified servers", re-picked
+    every round. Latencies are noisy, so the membership -- and the server
+    carrying traffic -- changed every few minutes for no real reason. Now a
+    member stays while it is still verified; only empty slots (a member left
+    pool B, or was excluded) are filled, best latency first. The server that
+    is carrying traffic goes first, so a rebuild keeps it as the default.
+    """
+    verified = [c for c in db.get_pool_configs("b", 0) if _cfg_tag(c) not in excluded]
+    limit = max_n if max_n and max_n > 0 else len(verified)
+    group = [c for c in verified if _cfg_tag(c) in current_tags][:limit]
+    taken = {_cfg_tag(c) for c in group}
+    for item in verified:
+        if len(group) >= limit:
+            break
+        if _cfg_tag(item) not in taken:
+            group.append(item)
+            taken.add(_cfg_tag(item))
+    group.sort(key=lambda c: _cfg_tag(c) != active_tag)  # stable: keeps latency order
+    return group
+
+
 def rebuild_and_apply(settings, db, force: bool = False,
                       allow_restart: bool = True) -> tuple[bool, str]:
     """Apply the current pool-B state to sing-box.
@@ -667,12 +696,16 @@ def rebuild_and_apply(settings, db, force: bool = False,
     standby_count = int(settings["proxy_group"].get("standby_count", 0))
     if standby_count > 0:
         max_n = min(max_n, standby_count) if max_n > 0 else standby_count
-    group = db.get_pool_configs("b", max_n)
-    new_tags = {f"cfg-{item['id']}" for item in group}
-    best_tag = f"cfg-{group[0]['id']}" if group else "direct"
-
     last_tags = _load_last_tags(settings)
+    active_tag = _clash_active_tag(settings)
+    group = select_group(db, max_n, last_tags or set(), active_tag)
+    new_tags = {_cfg_tag(item) for item in group}
+    # The server already carrying traffic stays first, so it stays active.
+    best_tag = _cfg_tag(group[0]) if group else "direct"
+
     if not force and last_tags is not None and last_tags == new_tags:
+        if active_tag == best_tag:
+            return True, f"pool unchanged {NO_RESTART_MARK}"
         ok, msg = set_active_config(settings, best_tag)
         if ok:
             log.info("active config switched to %s via Clash API (no restart)", best_tag)
@@ -716,9 +749,9 @@ def rebuild_and_apply(settings, db, force: bool = False,
 def refill_live_pool(settings, db, excluded_tags: set[str]) -> tuple[bool, str]:
     """Replace a failed live member with the next verified candidate."""
     standby_count = int(settings["proxy_group"].get("standby_count", 3))
-    candidates = db.get_pool_configs("b", max_n=max(standby_count * 3, standby_count))
-    group = [item for item in candidates
-             if f"cfg-{item['id']}" not in excluded_tags][:standby_count]
+    current = (_load_last_tags(settings) or set()) - set(excluded_tags)
+    group = select_group(db, standby_count, current, _clash_active_tag(settings),
+                         excluded=set(excluded_tags))
     config = build_config(settings, group)
     previous = _load_live_config(settings)
     ok, msg = write_and_check(settings, config)

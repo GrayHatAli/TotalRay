@@ -359,6 +359,7 @@ class TestBuilderMessageContract:
             "_save_last_tags": {},
             "_save_live_config": {},
             "set_active_config": {"return_value": (True, "switched")},
+            "_clash_active_tag": {"return_value": None},
         }
         mocks = {}
         stack = [patch(f"totalray.builder.{name}", **kw) for name, kw in patches.items()]
