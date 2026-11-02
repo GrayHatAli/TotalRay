@@ -63,7 +63,7 @@ DEFAULTS: dict = {
         "error_window_seconds": 10.0,
         "retransmit_threshold": 10,
         "retransmit_ratio": 0.15,
-        "retransmit_min_segments": 100,
+        "retransmit_min_segments": 30,
         "retransmit_sample_seconds": 5.0,
         "probe_interval_seconds": 7.0,
         "probe_timeout_seconds": 5.0,

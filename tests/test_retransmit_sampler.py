@@ -137,6 +137,22 @@ def test_real_link_noise_does_not_degrade():
         assert not detector.observe_retransmits(retrans, segs, now=5.0 * i), i
 
 
+def test_netem_loss_on_the_real_link_degrades_and_the_healthy_baseline_does_not():
+    """Per-5s (retransmits, segments) on the active server: healthy, then 25% netem loss
+    (measured on the live gateway; throughput collapses under loss, so segment counts drop)."""
+    healthy = [(4, 189), (1, 233), (5, 385)]
+    under_loss = [(17, 157), (13, 60), (14, 77), (8, 39), (12, 59), (14, 52), (1, 26), (9, 52), (14, 110)]
+    detector = DegradationDetector()
+    for i, (retrans, segs) in enumerate(healthy):
+        assert not detector.observe_retransmits(retrans, segs, now=5.0 * i)
+    flags = [detector.observe_retransmits(r, g, now=5.0 * (len(healthy) + i))
+             for i, (r, g) in enumerate(under_loss)]
+    assert any(flags), flags
+    # the 10s window still holds healthy samples at first, then three bad
+    # evaluations are needed (hysteresis): about 25s after the loss starts
+    assert flags.index(True) <= 5, "should notice within about 30s of the loss starting"
+
+
 def test_heavy_loss_degrades():
     detector = DegradationDetector()
     assert _feed(detector, [(30, 120), (35, 140), (30, 110), (28, 100)])
@@ -149,7 +165,7 @@ def test_busy_link_with_a_tiny_loss_rate_is_fine():
 
 def test_a_burst_with_too_few_segments_is_ignored():
     detector = DegradationDetector()
-    assert not _feed(detector, [(8, 30)] * 6)          # 27% of almost nothing
+    assert not _feed(detector, [(4, 8)] * 6)           # 50% of almost nothing
 
 
 def test_snapshot_reports_samples_and_ratio():

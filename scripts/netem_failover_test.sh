@@ -286,7 +286,9 @@ check_load_uses_active() {
 
 switch_changed() {
   if [ "$SHADOW" = true ]; then
-    [ "$(lm '.failover.history | length')" -gt "$BEFORE_HIST" ]
+    # the history keeps only the last 50 events, so its length stops growing;
+    # compare the timestamp of the newest event instead
+    [ "$(lm '.failover.history[-1].at')" != "$BEFORE_AT" ]
   else
     [ "$(active_tag)" != "$BEFORE_TAG" ]
   fi
@@ -298,7 +300,7 @@ scenario_switch() {
   BEFORE_TAG="$(active_tag)"
   ACTIVE="$BEFORE_TAG"
   BEFORE_COUNT="$(lm '.failover_count')"
-  BEFORE_HIST="$(lm '.failover.history | length')"
+  BEFORE_AT="$(lm '.failover.history[-1].at')"
   local server
   server="$(server_of "$ACTIVE")"
   mapfile -t SERVER_IPS < <(ips_of "$server")

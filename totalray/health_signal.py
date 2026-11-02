@@ -25,7 +25,7 @@ class DegradationDetector:
     def __init__(self, *, error_threshold: int = 3,
                  retransmit_threshold: int = 10,
                  retransmit_ratio: float = 0.15,
-                 retransmit_min_segments: int = 100,
+                 retransmit_min_segments: int = 30,
                  window_seconds: float = 10.0,
                  hysteresis_samples: int = 3):
         self.error_threshold = error_threshold
