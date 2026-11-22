@@ -58,6 +58,8 @@ class LiveMonitor:
         circuit_breaker_failures: int = 3,
         circuit_breaker_window_seconds: float = 300.0,
         shadow_mode: bool = True,
+        probe_urls: list[str] | None = None,
+        probe_min_destinations_ok: int = 1,
     ):
         self.settings = settings
         self.db = db
@@ -96,7 +98,8 @@ class LiveMonitor:
         self._last_probe = 0.0
         self._probe = StandbyProbe(
             self._clash_host, self._clash_secret,
-            timeout=probe_timeout_seconds, stale_after=probe_stale_seconds)
+            timeout=probe_timeout_seconds, stale_after=probe_stale_seconds,
+            urls=probe_urls, min_ok=probe_min_destinations_ok)
         self._failover = FailoverController(
             self._do_failover,
             cooldown_seconds=cooldown_seconds,
@@ -341,6 +344,11 @@ class LiveMonitor:
 def create_monitor(settings, db) -> LiveMonitor:
     """Create a LiveMonitor instance with configured settings."""
     lm_cfg = settings.data.get("live_monitor", {})
+    test_cfg = settings.data.get("test", {})
+    # Standby servers must answer the same destination majority as pool
+    # members, so a Google-only server is never the failover target.
+    probe_urls = [u for u in [test_cfg.get("url"), *(test_cfg.get("extra_urls") or [])] if u]
+    probe_min_ok = int(test_cfg.get("min_destinations_ok", 2)) if len(probe_urls) > 1 else 1
     
     # Use tighter thresholds for streaming-sensitive use cases
     return LiveMonitor(
@@ -361,4 +369,6 @@ def create_monitor(settings, db) -> LiveMonitor:
         circuit_breaker_failures=int(lm_cfg.get("circuit_breaker_failures", 3)),
         circuit_breaker_window_seconds=float(lm_cfg.get("circuit_breaker_window_seconds", 300.0)),
         shadow_mode=bool(lm_cfg.get("shadow_mode", True)),
+        probe_urls=probe_urls or None,
+        probe_min_destinations_ok=probe_min_ok,
     )

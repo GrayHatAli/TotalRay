@@ -42,10 +42,13 @@ scoped below. This plan follows the same phase format as
    the tag `remote`.
 4. **Fail soft.** A failed DNS re-bind must be logged and reported but must not
    undo or block a successful outbound reconcile.
-5. **Strict only where it is cheap.** Multi-destination checks run for Pool B
-   rounds and standby probes (tens of servers), never for the thousands of
-   Pool A candidates, and a server that fails the primary URL is rejected
-   without running the extra URLs.
+5. **Strict only where it is cheap, and the same rule on both sides of a
+   promotion.** A server that fails the primary URL is rejected without running
+   any extra URL, and the extras short-circuit as soon as the majority is
+   decided, so the thousands of Pool A candidates that fail cost nothing
+   extra. The rule must apply to Pool A promotion as well as to Pool B
+   retention: a Pool B failure demotes to Pool A, so a single-URL Pool A would
+   re-promote the same Google-only server on its next round and flap.
 
 ---
 
@@ -128,11 +131,11 @@ of destinations, so Google-only servers stop qualifying as "verified".
       `https://web.telegram.org/`) and `test.min_destinations_ok` (default `2`,
       counted over primary + extra URLs). An empty `extra_urls` restores the
       old single-URL behaviour exactly.
-- [ ] `tester.py`: new `measure_multi` used by Pool B rounds only. Primary URL
-      first (failure returns -1 immediately); extra URLs run only for servers
-      that passed it; result is the primary delay when at least
-      `min_destinations_ok` destinations succeeded, else -1. Pool A keeps the
-      single-URL path.
+- [ ] `tester.py`: new `measure_multi` used by Pool A and Pool B rounds. Primary
+      URL first (failure returns -1 immediately); extra URLs run only for
+      servers that passed it, in order, stopping as soon as the threshold is
+      met or can no longer be met; result is the primary delay when at least
+      `min_destinations_ok` destinations succeeded, else -1.
 - [ ] `standby_probe.py`: probe all configured URLs for a tag (in parallel,
       bounded by the existing timeout); a tag is ready only when enough URLs
       succeeded. Record per-URL results in `snapshot()` for `status`.
@@ -146,7 +149,7 @@ of destinations, so Google-only servers stop qualifying as "verified".
 ## Acceptance Criteria
 
 - [ ] With `extra_urls: []` every existing test passes unmodified.
-- [ ] Pool A rounds issue no extra requests (asserted in a test).
+- [ ] A server that fails the primary URL issues no extra requests (asserted in a test).
 - [ ] Full suite passes.
 
 ## Suggested Commit

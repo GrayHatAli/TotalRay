@@ -16,6 +16,8 @@ log = logging.getLogger(__name__)
 
 DEFAULT_CHUNK_SIZE = 96
 PORT_WAIT_SECONDS = 8.0
+# Extra-destination checks give up sooner than the primary test.
+EXTRA_URL_TIMEOUT_SECONDS = 6
 
 
 def _port_open(port: int) -> bool:
@@ -102,11 +104,44 @@ def measure(port: int, url: str, timeout: int, retries: int) -> int:
     return -1
 
 
+def measure_multi(port: int, url: str, extra_urls, timeout: int, retries: int,
+                  min_ok: int) -> int:
+    """Primary-URL delay, but only if enough destinations answer.
+
+    The primary URL runs first and a failure there returns -1 at once, so
+    servers that are simply dead cost nothing extra. The extras run in order
+    only for servers that passed it, and stop as soon as the threshold is met
+    (or can no longer be met). ``min_ok`` counts the primary URL too and is
+    clamped to the number of URLs configured. With no extras this is exactly
+    ``measure``.
+    """
+    delay = measure(port, url, timeout, retries)
+    extra_urls = list(extra_urls or [])
+    if delay <= 0 or not extra_urls:
+        return delay
+    required = max(1, min(int(min_ok), 1 + len(extra_urls)))
+    extra_timeout = min(int(timeout), EXTRA_URL_TIMEOUT_SECONDS)
+    passed = 1
+    for index, extra in enumerate(extra_urls):
+        if passed >= required:
+            break
+        if passed + (len(extra_urls) - index) < required:
+            return -1
+        # No retry and a shorter timeout: one flaky extra is already
+        # tolerated by the majority rule, so retrying it only slows rounds.
+        if measure(port, extra, extra_timeout, 0) > 0:
+            passed += 1
+    return delay if passed >= required else -1
+
+
 class GroupTester:
     def __init__(self, settings, pool: str = "a"):
         self.bin = settings["paths"]["sing_box_bin"]
         test = settings["test"]
         self.url = test["url"]
+        # Extra destinations (see measure_multi). Empty = single-URL check.
+        self.extra_urls = list(test.get("extra_urls") or [])
+        self.min_destinations_ok = int(test.get("min_destinations_ok", 2))
         self.timeout = int(test["timeout_seconds"])
         self.concurrency = int(test["concurrency"])
         self.retries = int(test["retries"])
@@ -191,8 +226,9 @@ class GroupTester:
                         f"(code {proc.returncode})")
                 with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
                     futures = {
-                        pool.submit(measure, self.base_port + i,
-                                    self.url, self.timeout, self.retries):
+                        pool.submit(measure_multi, self.base_port + i,
+                                    self.url, self.extra_urls, self.timeout,
+                                    self.retries, self.min_destinations_ok):
                         item["id"]
                         for i, item in enumerate(items)
                     }

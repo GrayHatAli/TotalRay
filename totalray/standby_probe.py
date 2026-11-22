@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from urllib.parse import quote
 
 import requests
+
+DEFAULT_URL = "https://www.gstatic.com/generate_204"
 
 
 @dataclass
@@ -15,6 +18,9 @@ class ProbeResult:
     delay_ms: int | None = None
     last_success: float | None = None
     last_error: str | None = None
+    # Per-destination outcome of the latest probe: url -> delay in ms, or
+    # None when that destination did not answer.
+    destinations: dict = field(default_factory=dict)
 
     def ready(self, now: float, stale_after: float) -> bool:
         return (self.delay_ms is not None and self.delay_ms > 0 and
@@ -23,18 +29,21 @@ class ProbeResult:
 
 class StandbyProbe:
     def __init__(self, host: str, secret: str = "", *, timeout: float = 5.0,
-                 stale_after: float = 20.0, session=None):
+                 stale_after: float = 20.0, session=None,
+                 urls: list[str] | None = None, min_ok: int = 1):
         self.host = host
         self.headers = {"Authorization": f"Bearer {secret}"} if secret else {}
         self.timeout = timeout
         self.stale_after = stale_after
         self.session = session or requests.Session()
+        # The first URL is the primary one; `min_ok` counts it too and is
+        # clamped to the number of URLs. One URL = the original behaviour.
+        self.urls = [u for u in (urls or []) if u] or [DEFAULT_URL]
+        self.min_ok = max(1, min(int(min_ok), len(self.urls)))
         self._results: dict[str, ProbeResult] = {}
         self._lock = threading.Lock()
 
-    def probe(self, tag: str, url: str = "https://www.gstatic.com/generate_204") -> ProbeResult:
-        with self._lock:
-            result = self._results.setdefault(tag, ProbeResult(tag))
+    def _probe_url(self, tag: str, url: str) -> tuple[int | None, str | None]:
         endpoint = (f"http://{self.host}/proxies/{quote(tag, safe='')}/delay"
                     f"?url={quote(url, safe='')}&timeout={int(self.timeout * 1000)}")
         try:
@@ -44,14 +53,41 @@ class StandbyProbe:
             if delay <= 0:
                 raise ValueError("probe returned no positive delay")
         except (requests.RequestException, ValueError, TypeError, OSError) as exc:
-            with self._lock:
-                result.delay_ms = None
-                result.last_error = str(exc)
+            return None, str(exc)
+        return delay, None
+
+    def probe(self, tag: str, url: str | None = None) -> ProbeResult:
+        """Probe ``tag``; ready only if enough destinations answer.
+
+        An explicit ``url`` probes just that one destination (and needs it
+        to answer). Otherwise every configured URL is probed in parallel, so
+        the call still takes about one timeout, and at least ``min_ok`` of
+        them must answer.
+        """
+        with self._lock:
+            result = self._results.setdefault(tag, ProbeResult(tag))
+        urls = [url] if url else self.urls
+        needed = 1 if url else self.min_ok
+        if len(urls) == 1:
+            outcomes = [self._probe_url(tag, urls[0])]
         else:
-            with self._lock:
-                result.delay_ms = delay
+            with ThreadPoolExecutor(max_workers=len(urls)) as pool:
+                outcomes = list(pool.map(lambda u: self._probe_url(tag, u), urls))
+
+        destinations = {u: delay for u, (delay, _err) in zip(urls, outcomes)}
+        answered = [delay for delay, _err in outcomes if delay]
+        errors = [f"{u}: {err}" for u, (_d, err) in zip(urls, outcomes) if err]
+        with self._lock:
+            result.destinations = destinations
+            if len(answered) >= needed:
+                # Report the primary destination's latency when it answered.
+                result.delay_ms = outcomes[0][0] or min(answered)
                 result.last_success = time.time()
-                result.last_error = None
+                result.last_error = "; ".join(errors) if errors else None
+            else:
+                result.delay_ms = None
+                result.last_error = ("; ".join(errors) if errors
+                                     else "not enough destinations answered")
         return result
 
     def keep_only(self, tags) -> None:
@@ -73,5 +109,6 @@ class StandbyProbe:
             return {tag: {"tag": result.tag, "delay_ms": result.delay_ms,
                           "last_success": result.last_success,
                           "last_error": result.last_error,
+                          "destinations": dict(result.destinations),
                           "ready": result.ready(time.time(), self.stale_after)}
                     for tag, result in self._results.items()}
