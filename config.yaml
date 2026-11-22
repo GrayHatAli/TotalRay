@@ -75,7 +75,7 @@ live_monitor:
   probe_stale_seconds: 20.0
   circuit_breaker_failures: 3
   circuit_breaker_window_seconds: 300.0
-  shadow_mode: true            # set false only after the Phase-8 shadow period
+  shadow_mode: false           # true = only log "shadow recommendation" lines and never switch (staged rollout)
 
 routing:
   iran_direct: true           # Iranian domains/IPs -> direct connection
