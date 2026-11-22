@@ -58,3 +58,7 @@ class SingboxCoreClient:
 
     def remove_outbound(self, tag: str) -> None:
         self.request("remove_outbound", tag=tag)
+
+    def reload_dns_server(self, config: dict) -> None:
+        """Re-create one ``dns.servers`` entry so its detour binds to the live groups."""
+        self.request("reload_dns_server", config=config)

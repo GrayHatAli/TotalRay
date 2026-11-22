@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 from totalray.failover import FailoverController
 from totalray.health_signal import DegradationDetector
-from totalray.singbox_core import SingboxCoreClient
+from totalray.singbox_core import SingboxCoreClient, SingboxCoreError
 from totalray.standby_pool import StandbyPool
 from totalray.standby_probe import StandbyProbe
 
@@ -15,6 +15,7 @@ class FakeCore:
     def __init__(self):
         self.calls = []
         self.running = True
+        self.dns_error = None
 
     def is_running(self):
         return self.running
@@ -24,6 +25,11 @@ class FakeCore:
 
     def remove_outbound(self, tag):
         self.calls.append(("remove", tag))
+
+    def reload_dns_server(self, config):
+        self.calls.append(("reload_dns", config["tag"]))
+        if self.dns_error is not None:
+            raise self.dns_error
 
 
 def _config(tags):
@@ -202,3 +208,96 @@ def test_apply_live_config_empty_new_group_still_falls_back(monkeypatch):
     result = builder._apply_live_config({}, _config([]), _config(["cfg-1"]))
     assert result is not None and result[0] is False
     assert core.calls == []
+
+
+def _config_with_dns(tags):
+    config = _config(tags)
+    config["dns"] = {
+        "servers": [
+            {"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "select"},
+            {"type": "udp", "tag": "local", "server": "192.168.1.1"},
+            {"type": "https", "tag": "via-direct", "server": "9.9.9.9", "detour": "direct"},
+        ],
+        "final": "remote",
+    }
+    return config
+
+
+def test_standby_reconcile_rebinds_group_detour_dns_after_groups_and_before_leaf_removal():
+    core = FakeCore()
+    pool = StandbyPool(core)
+
+    message = pool.reconcile(_config_with_dns(["cfg-2", "cfg-3"]),
+                             _config_with_dns(["cfg-1", "cfg-2"]))
+
+    assert core.calls == [
+        ("add", "cfg-3"),
+        ("remove", "select"),
+        ("remove", "auto"),
+        ("add", "auto"),
+        ("add", "select"),
+        ("reload_dns", "remote"),   # only the server that detours through select
+        ("remove", "cfg-1"),
+    ]
+    assert "1 DNS server(s) rebound" in message
+
+
+def test_standby_reconcile_does_not_rebind_dns_when_groups_are_unchanged():
+    core = FakeCore()
+    pool = StandbyPool(core)
+    old = _config_with_dns(["cfg-1", "cfg-2"])
+    new = _config_with_dns(["cfg-1", "cfg-2"])
+    # An extra leaf that no group references leaves auto/select untouched.
+    new["outbounds"].append({"type": "direct", "tag": "cfg-extra"})
+
+    message = pool.reconcile(new, old)
+
+    assert core.calls == [("add", "cfg-extra")]
+    assert "DNS" not in message
+
+
+def test_standby_reconcile_without_dns_section_makes_no_dns_calls():
+    core = FakeCore()
+    pool = StandbyPool(core)
+
+    pool.reconcile(_config(["cfg-2", "cfg-3"]), _config(["cfg-1", "cfg-2"]))
+
+    assert not [call for call in core.calls if call[0] == "reload_dns"]
+
+
+def test_standby_reconcile_survives_a_failed_dns_rebind():
+    core = FakeCore()
+    core.dns_error = SingboxCoreError('unknown cmd "reload_dns_server"')
+    pool = StandbyPool(core)
+
+    message = pool.reconcile(_config_with_dns(["cfg-2", "cfg-3"]),
+                             _config_with_dns(["cfg-1", "cfg-2"]))
+
+    # The outbound reconcile still completed, including retiring the old leaf.
+    assert core.calls[-1] == ("remove", "cfg-1")
+    assert "live pool reconciled" in message
+    assert "DNS rebind FAILED for remote" in message
+
+
+def test_standby_reconcile_survives_a_socket_error_during_dns_rebind():
+    core = FakeCore()
+    core.dns_error = OSError("socket closed")
+    pool = StandbyPool(core)
+
+    message = pool.reconcile(_config_with_dns(["cfg-2", "cfg-3"]),
+                             _config_with_dns(["cfg-1", "cfg-2"]))
+
+    assert core.calls[-1] == ("remove", "cfg-1")
+    assert "DNS rebind FAILED for remote" in message
+
+
+def test_client_reload_dns_server_sends_the_command(monkeypatch):
+    client = SingboxCoreClient("/tmp/does-not-matter.sock")
+    sent = []
+    monkeypatch.setattr(client, "request",
+                        lambda command, **fields: sent.append((command, fields)) or {"ok": True})
+    server = {"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "select"}
+
+    client.reload_dns_server(server)
+
+    assert sent == [("reload_dns_server", {"config": server})]

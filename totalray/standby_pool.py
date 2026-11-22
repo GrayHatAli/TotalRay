@@ -58,6 +58,8 @@ class StandbyPool:
         for tag in sorted(new_leaf_tags):
             self.client.add_outbound(wanted[tag])
 
+        dns_rebound = 0
+        dns_failed: list[str] = []
         if groups_changed:
             # select depends on auto, so remove it first. Route rules refer to
             # the tag and are unchanged; the transition is intentionally tiny.
@@ -67,6 +69,10 @@ class StandbyPool:
             for tag in self.GROUP_TAGS:
                 if tag in wanted:
                     self.client.add_outbound(wanted[tag])
+            # A DNS server that detours through a group keeps the OLD group
+            # object (sing-box resolves a detour once), so it would die with
+            # the retired chain. Rebind it to the groups just re-added.
+            dns_rebound, dns_failed = self._rebind_dns(desired)
 
         for tag in sorted(removed_leaf_tags):
             self.client.remove_outbound(tag)
@@ -74,4 +80,32 @@ class StandbyPool:
         changed = len(new_leaf_tags) + len(removed_leaf_tags)
         if groups_changed:
             changed += len(self.GROUP_TAGS)
-        return f"live pool reconciled ({changed} outbound changes)"
+        summary = f"live pool reconciled ({changed} outbound changes)"
+        if dns_rebound:
+            summary += f", {dns_rebound} DNS server(s) rebound"
+        if dns_failed:
+            summary += f", DNS rebind FAILED for {', '.join(dns_failed)}"
+        return summary
+
+    def _rebind_dns(self, desired: dict) -> tuple[int, list[str]]:
+        """Reload every DNS server whose detour is a replaced group.
+
+        Best effort: outbound reconciliation has already succeeded by the
+        time this runs, so a failure here is reported but never raised.
+        """
+        servers = (desired.get("dns") or {}).get("servers") or []
+        rebound = 0
+        failed: list[str] = []
+        for server in servers:
+            tag = server.get("tag")
+            if not tag or server.get("detour") not in self.GROUP_TAGS:
+                continue
+            try:
+                self.client.reload_dns_server(server)
+            except (SingboxCoreError, OSError) as exc:
+                log.warning("could not rebind DNS server %s to the live groups: %s",
+                            tag, exc)
+                failed.append(tag)
+            else:
+                rebound += 1
+        return rebound, failed
