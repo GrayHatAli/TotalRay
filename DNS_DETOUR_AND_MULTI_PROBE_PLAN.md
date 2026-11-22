@@ -127,30 +127,30 @@ of destinations, so Google-only servers stop qualifying as "verified".
 
 ## Tasks
 
-- [ ] Settings: `test.extra_urls` (default: `https://cp.cloudflare.com/generate_204`,
+- [x] Settings: `test.extra_urls` (default: `https://cp.cloudflare.com/generate_204`,
       `https://web.telegram.org/`) and `test.min_destinations_ok` (default `2`,
       counted over primary + extra URLs). An empty `extra_urls` restores the
       old single-URL behaviour exactly.
-- [ ] `tester.py`: new `measure_multi` used by Pool A and Pool B rounds. Primary
+- [x] `tester.py`: new `measure_multi` used by Pool A and Pool B rounds. Primary
       URL first (failure returns -1 immediately); extra URLs run only for
       servers that passed it, in order, stopping as soon as the threshold is
       met or can no longer be met; result is the primary delay when at least
       `min_destinations_ok` destinations succeeded, else -1.
-- [ ] `standby_probe.py`: probe all configured URLs for a tag (in parallel,
+- [x] `standby_probe.py`: probe all configured URLs for a tag (in parallel,
       bounded by the existing timeout); a tag is ready only when enough URLs
       succeeded. Record per-URL results in `snapshot()` for `status`.
-- [ ] `live_monitor.create_monitor` passes the URLs and threshold to
+- [x] `live_monitor.create_monitor` passes the URLs and threshold to
       `StandbyProbe`.
-- [ ] Config template: document the new keys in `config.yaml`.
-- [ ] Tests: tester (all pass / primary fails / 1-of-3 fails the 2-of-3 rule /
+- [x] Config template: document the new keys in `config.yaml`.
+- [x] Tests: tester (all pass / primary fails / 1-of-3 fails the 2-of-3 rule /
       empty extras = old behaviour), probe (ready only at threshold, partial
       failure recorded), settings defaults.
 
 ## Acceptance Criteria
 
-- [ ] With `extra_urls: []` every existing test passes unmodified.
-- [ ] A server that fails the primary URL issues no extra requests (asserted in a test).
-- [ ] Full suite passes.
+- [x] With `extra_urls: []` every existing test passes unmodified.
+- [x] A server that fails the primary URL issues no extra requests (asserted in a test).
+- [x] Full suite passes.
 
 ## Suggested Commit
 
