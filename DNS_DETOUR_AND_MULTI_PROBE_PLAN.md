@@ -166,25 +166,48 @@ Ship both fixes to the Pi and prove them on the real gateway.
 
 ## Tasks
 
-- [ ] Cross-compile `singbox-core` for linux/arm (GOARM=7) with the Makefile
+- [x] Cross-compile `singbox-core` for linux/arm (GOARM=7) with the Makefile
       tags; `scripts/pre_deploy_check.sh` passes.
-- [ ] Offline deploy with `TOTALRAY_SRC_DIR` + `TOTALRAY_PREBUILT_CORE`
+- [x] Offline deploy with `TOTALRAY_SRC_DIR` + `TOTALRAY_PREBUILT_CORE`
       (`scripts/update.sh`); record before/after `md5sum` of deployed files.
-- [ ] Verify DNS: a query to the embedded resolver (`127.0.0.1:1053`) returns an
+- [x] Verify DNS: a query to the embedded resolver (`127.0.0.1:1053`) returns an
       answer; zero new `dial tcp 54.37.240.40:8080` errors after the restart.
-- [ ] Verify it **survives a group replacement**: after the next
+- [x] Verify it **survives a group replacement**: after the next
       `live pool reconciled` event the resolver still answers and no stale-leaf
       DNS errors appear.
-- [ ] Verify multi-destination health: pool B round logs, `totalray status`
+- [x] Verify multi-destination health: pool B round logs, `totalray status`
       probe snapshot shows per-URL results, and the live group members all pass
       the majority rule.
 
 ## Acceptance Criteria
 
-- [ ] All three services active; exit IP works through the HTTP proxy.
-- [ ] The two verification observations above recorded in the commit message
+- [x] All three services active; exit IP works through the HTTP proxy.
+- [x] The two verification observations above recorded in the commit message
       or the plan.
 
 ## Suggested Commit
 
 `docs(plan): record live verification of DNS rebinding and multi-destination health`
+
+## Live verification (2026-11-22, deployed 23:03:10 +0330)
+
+- Deployed offline (`TOTALRAY_SRC_DIR` + cross-compiled linux/arm `singbox-core`,
+  md5 `4b19dcd546d0688af8f5bb391b780b86`); every deployed Python file is
+  byte-identical to the commit. Pre-deploy check 12/12.
+- DNS: the embedded resolver (`127.0.0.1:1053`) answers every query (google.com,
+  telegram.org, oracle.com, example.org). Since the deploy: 0 `dns: exchange
+  failed` lines and 0 references to the retired `54.37.240.40:8080` leaf, across
+  5 live group replacements (`live pool reconciled ..., 1 DNS server(s) rebound`).
+- Multi-destination: `live_monitor_status.json` now records per-URL results for
+  every standby. Pool B healthy ratio: mean 82% over 722 rounds before the
+  deploy, 79% over 24 rounds after it.
+
+## Post-deploy finding: 2-of-3 still admits a Telegram-dead server
+
+`cfg-12669905` (the server failover moved to) passes gstatic and Cloudflare but
+fails Telegram: the probe records `web.telegram.org` as a 503 from the Clash
+delay endpoint, and through the real proxy path `curl` to `web.telegram.org` /
+`api.telegram.org` fails the TLS handshake (exit 35) while gstatic and
+Cloudflare return 204. A majority rule cannot express "Telegram is mandatory".
+Options: `min_destinations_ok: 3` (all destinations) or a `required_urls` list.
+Not changed in this plan; it is a policy decision (fewer eligible servers).
