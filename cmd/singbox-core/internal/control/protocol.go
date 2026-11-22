@@ -12,6 +12,7 @@ import "encoding/json"
 //	{"cmd":"stop"}
 //	{"cmd":"add_outbound","config":{...}}
 //	{"cmd":"remove_outbound","tag":"..."}
+//	{"cmd":"reload_dns_server","config":{...}}   (one dns.servers entry; re-binds its detour)
 //	{"cmd":"is_running"}
 type Request struct {
 	Cmd    string          `json:"cmd"`

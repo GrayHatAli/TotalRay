@@ -24,6 +24,7 @@ type Controller interface {
 	IsRunning() bool
 	AddOutbound(configJSON []byte) error
 	RemoveOutbound(tag string) error
+	ReloadDNSServer(configJSON []byte) error
 }
 
 // Server serves the control protocol over a Unix domain socket.
@@ -194,6 +195,15 @@ func (s *Server) dispatch(line []byte) Response {
 			return fail(errors.New("remove_outbound requires tag"))
 		}
 		if err := s.Controller.RemoveOutbound(req.Tag); err != nil {
+			return fail(err)
+		}
+		return ok()
+
+	case "reload_dns_server":
+		if len(req.Config) == 0 {
+			return fail(errors.New("reload_dns_server requires config"))
+		}
+		if err := s.Controller.ReloadDNSServer(req.Config); err != nil {
 			return fail(err)
 		}
 		return ok()

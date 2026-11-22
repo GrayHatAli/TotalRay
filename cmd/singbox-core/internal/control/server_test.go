@@ -22,10 +22,19 @@ type fakeController struct {
 	stopCalls   int
 	addCalls    [][]byte
 	removeCalls []string
+	reloadCalls [][]byte
 	startErr    error
 	stopErr     error
 	addErr      error
 	removeErr   error
+	reloadErr   error
+}
+
+func (f *fakeController) ReloadDNSServer(config []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reloadCalls = append(f.reloadCalls, append([]byte(nil), config...))
+	return f.reloadErr
 }
 
 func (f *fakeController) Start(config []byte) error {
@@ -170,6 +179,9 @@ func TestServerRejectsMissingFields(t *testing.T) {
 	if resp := roundTrip(t, conn, Request{Cmd: "remove_outbound"}); resp.OK {
 		t.Fatal("expected failure for remove_outbound with no tag")
 	}
+	if resp := roundTrip(t, conn, Request{Cmd: "reload_dns_server"}); resp.OK {
+		t.Fatal("expected failure for reload_dns_server with no config")
+	}
 	if resp := roundTrip(t, conn, Request{Cmd: "bogus"}); resp.OK {
 		t.Fatal("expected failure for unknown cmd")
 	}
@@ -216,4 +228,24 @@ func TestListenRemovesStaleSocket(t *testing.T) {
 		t.Fatalf("second Listen (stale socket cleanup): %v", err)
 	}
 	t.Cleanup(func() { second.Close() })
+}
+
+func TestServerReloadDNSServer(t *testing.T) {
+	fc := &fakeController{}
+	_, conn := testServer(t, fc)
+
+	cfg := `{"type":"https","tag":"remote","server":"1.1.1.1","detour":"select"}`
+	resp := roundTrip(t, conn, Request{Cmd: "reload_dns_server", Config: json.RawMessage(cfg)})
+	if !resp.OK {
+		t.Fatalf("reload_dns_server: %+v", resp)
+	}
+	if len(fc.reloadCalls) != 1 || string(fc.reloadCalls[0]) != cfg {
+		t.Fatalf("expected one ReloadDNSServer call with the config, got %q", fc.reloadCalls)
+	}
+
+	fc.reloadErr = errors.New("dns boom")
+	resp = roundTrip(t, conn, Request{Cmd: "reload_dns_server", Config: json.RawMessage(cfg)})
+	if resp.OK || resp.Error != "dns boom" {
+		t.Fatalf("expected propagated error \"dns boom\", got %+v", resp)
+	}
 }
