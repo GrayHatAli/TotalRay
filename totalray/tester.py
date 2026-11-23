@@ -106,32 +106,39 @@ def measure(port: int, url: str, timeout: int, retries: int) -> int:
 
 def measure_multi(port: int, url: str, extra_urls, timeout: int, retries: int,
                   min_ok: int) -> int:
-    """Primary-URL delay, but only if enough destinations answer.
+    """Delay of the first destination that answered, if enough of them did.
 
-    The primary URL runs first and a failure there returns -1 at once, so
-    servers that are simply dead cost nothing extra. The extras run in order
-    only for servers that passed it, and stop as soon as the threshold is met
-    (or can no longer be met). ``min_ok`` counts the primary URL too and is
-    clamped to the number of URLs configured. With no extras this is exactly
-    ``measure``.
+    ``url`` plus ``extra_urls`` are the destinations; ``min_ok`` is how many
+    must answer (clamped to ``1 .. number of URLs``). ``min_ok=1`` means "any
+    one of them is enough", ``min_ok=len`` means "all of them". No URL has a
+    special role: they run in order and the check stops as soon as the
+    threshold is met or can no longer be met, so dead servers cost little and
+    healthy ones usually need a single request.
+
+    The first URL gets the full ``timeout`` and ``retries``; the others use a
+    shorter timeout and no retry (a flaky extra is already covered by the
+    threshold, so retrying it only slows rounds). With no extras this is
+    exactly ``measure``.
     """
-    delay = measure(port, url, timeout, retries)
-    extra_urls = list(extra_urls or [])
-    if delay <= 0 or not extra_urls:
-        return delay
-    required = max(1, min(int(min_ok), 1 + len(extra_urls)))
+    urls = [url] + list(extra_urls or [])
+    required = max(1, min(int(min_ok), len(urls)))
     extra_timeout = min(int(timeout), EXTRA_URL_TIMEOUT_SECONDS)
-    passed = 1
-    for index, extra in enumerate(extra_urls):
+    passed = 0
+    first_delay = -1
+    for index, candidate in enumerate(urls):
         if passed >= required:
             break
-        if passed + (len(extra_urls) - index) < required:
+        if passed + (len(urls) - index) < required:
             return -1
-        # No retry and a shorter timeout: one flaky extra is already
-        # tolerated by the majority rule, so retrying it only slows rounds.
-        if measure(port, extra, extra_timeout, 0) > 0:
+        if index == 0:
+            delay = measure(port, candidate, timeout, retries)
+        else:
+            delay = measure(port, candidate, extra_timeout, 0)
+        if delay > 0:
             passed += 1
-    return delay if passed >= required else -1
+            if first_delay < 0:
+                first_delay = delay
+    return first_delay if passed >= required else -1
 
 
 class GroupTester:

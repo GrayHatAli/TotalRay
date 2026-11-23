@@ -32,17 +32,14 @@ DEFAULTS: dict = {
         "batch_size": 5000,
     },
     "test": {
-        "url": "https://www.gstatic.com/generate_204",
-        # Extra destinations checked only for servers that pass `url`. A
-        # server counts as healthy when at least `min_destinations_ok` of
-        # (url + extra_urls) answer; an empty list restores the single-URL
-        # check. A server that reaches one site but not the others is not
-        # usable for the real traffic mix (Telegram, push services, CDNs).
-        "extra_urls": [
-            "https://cp.cloudflare.com/generate_204",
-            "https://web.telegram.org/",
-        ],
-        "min_destinations_ok": 2,
+        # A server is healthy when at least `min_destinations_ok` of
+        # (`url` + `extra_urls`) answer over HTTPS. The destinations are sites
+        # that are filtered in Iran, so a server that passes can really carry
+        # that traffic; a generic site such as gstatic only proves the server
+        # is up. 1 = any one is enough, N = all N required.
+        "url": "https://web.telegram.org/",
+        "extra_urls": ["https://facebook.com/"],
+        "min_destinations_ok": 1,
         "timeout_seconds": 10,
         "concurrency": 16,
         "retries": 1,

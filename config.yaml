@@ -32,11 +32,13 @@ schedule:
   pool_a_retry_backoff_minutes: 0  # 0 = no retest backoff
 
 test:
-  url: "https://www.gstatic.com/generate_204"  # real-connectivity test target (not ping)
-  extra_urls:                 # checked only for servers that pass `url` (empty list = single-URL check)
-    - "https://cp.cloudflare.com/generate_204"
-    - "https://web.telegram.org/"
-  min_destinations_ok: 2      # destinations (url + extra_urls) that must answer for a server to count as healthy
+  # Health = reaching sites that are FILTERED in Iran, over https. A server is
+  # healthy when at least `min_destinations_ok` of url + extra_urls answer
+  # (1 = any one is enough, 2 = both). Extras run only when needed.
+  url: "https://web.telegram.org/"
+  extra_urls:
+    - "https://facebook.com/"
+  min_destinations_ok: 1
   timeout_seconds: 10
   concurrency: 16             # simultaneous tests
   retries: 1                  # retry attempts for failures within the same round

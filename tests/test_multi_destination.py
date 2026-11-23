@@ -1,12 +1,12 @@
-"""Multi-destination health: a server must answer a majority of destinations.
+"""Multi-destination health: a server must answer enough destinations.
 
-A server that reaches Google but not Cloudflare or Telegram is not usable for
-the real traffic mix, yet used to count as "verified" when only one URL was
-checked (see DNS_DETOUR_AND_MULTI_PROBE_PLAN.md, Phase 3).
+The destinations are sites filtered in Iran (web.telegram.org, facebook.com):
+a server that answers one of them can carry that traffic, whereas a generic
+connectivity URL only proves the server is up. ``min_destinations_ok`` says how
+many must answer: 1 = any one, N = all (see DNS_DETOUR_AND_MULTI_PROBE_PLAN.md).
 """
 from __future__ import annotations
 
-import time
 from unittest.mock import Mock
 
 import pytest
@@ -18,9 +18,9 @@ from totalray.settings import Settings
 from totalray.standby_probe import StandbyProbe
 from totalray.tester import GroupTester, measure_multi
 
-PRIMARY = "https://primary.test/"
+TG = "https://web.telegram.org/"
+FB = "https://facebook.com/"
 CF = "https://cloudflare.test/"
-TG = "https://telegram.test/"
 
 
 class FakeMeasure:
@@ -44,63 +44,89 @@ def fake(monkeypatch):
     return install
 
 
-def test_primary_failure_runs_no_extra_url(fake):
-    fm = fake({PRIMARY: -1, CF: 50, TG: 50})
-    assert measure_multi(1, PRIMARY, [CF, TG], 10, 1, 2) == -1
-    assert [c[0] for c in fm.calls] == [PRIMARY]
+def urls_called(fm):
+    return [c[0] for c in fm.calls]
 
 
-def test_majority_reached_stops_early_and_returns_primary_delay(fake):
-    fm = fake({PRIMARY: 321, CF: 50, TG: 50})
-    assert measure_multi(1, PRIMARY, [CF, TG], 10, 1, 2) == 321
-    # primary + cloudflare already make 2 of 3: telegram is never run
-    assert [c[0] for c in fm.calls] == [PRIMARY, CF]
+# --- "any one is enough" (min_ok = 1): the production rule ----------------
+
+def test_any_one_enough_first_url_answers_and_second_is_never_run(fake):
+    fm = fake({TG: 321, FB: 50})
+    assert measure_multi(1, TG, [FB], 10, 1, 1) == 321
+    assert urls_called(fm) == [TG]
 
 
-def test_second_extra_rescues_a_failed_first_extra(fake):
-    fm = fake({PRIMARY: 300, CF: -1, TG: 80})
-    assert measure_multi(1, PRIMARY, [CF, TG], 10, 1, 2) == 300
-    assert [c[0] for c in fm.calls] == [PRIMARY, CF, TG]
+def test_any_one_enough_second_url_rescues_a_failed_first(fake):
+    fm = fake({TG: -1, FB: 80})
+    assert measure_multi(1, TG, [FB], 10, 1, 1) == 80   # the delay of the URL that answered
+    assert urls_called(fm) == [TG, FB]
 
 
-def test_google_only_server_is_rejected(fake):
-    fake({PRIMARY: 300, CF: -1, TG: -1})
-    assert measure_multi(1, PRIMARY, [CF, TG], 10, 1, 2) == -1
+def test_any_one_enough_but_none_answers_is_unhealthy(fake):
+    fm = fake({TG: -1, FB: -1})
+    assert measure_multi(1, TG, [FB], 10, 1, 1) == -1
+    assert urls_called(fm) == [TG, FB]
 
 
-def test_all_destinations_required_when_min_ok_is_three(fake):
-    fake({PRIMARY: 300, CF: 50, TG: -1})
-    assert measure_multi(1, PRIMARY, [CF, TG], 10, 1, 3) == -1
+# --- stricter thresholds --------------------------------------------------
+
+def test_both_required_rejects_after_the_first_failure(fake):
+    fm = fake({TG: -1, FB: 50})
+    assert measure_multi(1, TG, [FB], 10, 1, 2) == -1
+    assert urls_called(fm) == [TG]       # FB can no longer rescue it: not run
+
+
+def test_both_required_accepts_when_both_answer(fake):
+    fake({TG: 300, FB: 50})
+    assert measure_multi(1, TG, [FB], 10, 1, 2) == 300
+
+
+def test_majority_of_three_without_the_first_url(fake):
+    fm = fake({TG: -1, FB: 60, CF: 70})
+    assert measure_multi(1, TG, [FB, CF], 10, 1, 2) == 60
+    assert urls_called(fm) == [TG, FB, CF]
+
+
+def test_majority_of_three_stops_as_soon_as_it_is_decided(fake):
+    fm = fake({TG: 300, FB: 50, CF: 50})
+    assert measure_multi(1, TG, [FB, CF], 10, 1, 2) == 300
+    assert urls_called(fm) == [TG, FB]
 
 
 def test_min_ok_is_clamped_to_the_number_of_urls(fake):
-    fm = fake({PRIMARY: 300, CF: 50})
-    assert measure_multi(1, PRIMARY, [CF], 10, 1, 9) == 300
-    assert [c[0] for c in fm.calls] == [PRIMARY, CF]
+    fake({TG: 300, FB: 50})
+    assert measure_multi(1, TG, [FB], 10, 1, 9) == 300
+    fake({TG: 300, FB: -1})
+    assert measure_multi(1, TG, [FB], 10, 1, 9) == -1
+
+
+def test_min_ok_below_one_still_needs_one_answer(fake):
+    fake({TG: -1, FB: -1})
+    assert measure_multi(1, TG, [FB], 10, 1, 0) == -1
 
 
 def test_no_extra_urls_is_exactly_the_single_url_check(fake):
-    fm = fake({PRIMARY: 300})
-    assert measure_multi(1, PRIMARY, [], 10, 1, 2) == 300
-    assert measure_multi(1, PRIMARY, None, 10, 1, 2) == 300
-    assert [c[0] for c in fm.calls] == [PRIMARY, PRIMARY]
+    fm = fake({TG: 300})
+    assert measure_multi(1, TG, [], 10, 1, 2) == 300
+    assert measure_multi(1, TG, None, 10, 1, 2) == 300
+    assert urls_called(fm) == [TG, TG]
 
 
 def test_extras_use_a_short_timeout_and_no_retry(fake):
-    fm = fake({PRIMARY: 300, CF: -1, TG: 50})
-    measure_multi(1, PRIMARY, [CF, TG], 10, 3, 2)
-    assert fm.calls[0] == (PRIMARY, 10, 3)
-    for _url, timeout, retries in fm.calls[1:]:
-        assert timeout == tester.EXTRA_URL_TIMEOUT_SECONDS
-        assert retries == 0
+    fm = fake({TG: -1, FB: 50})
+    measure_multi(1, TG, [FB], 10, 3, 1)
+    assert fm.calls[0] == (TG, 10, 3)
+    assert fm.calls[1] == (FB, tester.EXTRA_URL_TIMEOUT_SECONDS, 0)
     # a primary timeout already below the extras' cap is respected
     fm.calls.clear()
-    measure_multi(1, PRIMARY, [CF, TG], 4, 0, 2)
+    measure_multi(1, TG, [FB], 4, 0, 1)
     assert fm.calls[1][1] == 4
 
 
+# --- GroupTester wiring ---------------------------------------------------
+
 def _tester_settings(**test_overrides):
-    test = {"url": PRIMARY, "timeout_seconds": 1, "concurrency": 2, "retries": 0,
+    test = {"url": TG, "timeout_seconds": 1, "concurrency": 2, "retries": 0,
             "base_port": 24000, "chunk_size": 96}
     test.update(test_overrides)
     return {"paths": {"sing_box_bin": "/bin/true"}, "test": test,
@@ -108,11 +134,11 @@ def _tester_settings(**test_overrides):
 
 
 def test_group_tester_reads_extra_urls_for_both_pools():
-    settings = _tester_settings(extra_urls=[CF, TG], min_destinations_ok=2)
+    settings = _tester_settings(extra_urls=[FB], min_destinations_ok=1)
     for pool in ("a", "b"):
         gt = GroupTester(settings, pool=pool)
-        assert gt.extra_urls == [CF, TG]
-        assert gt.min_destinations_ok == 2
+        assert gt.extra_urls == [FB]
+        assert gt.min_destinations_ok == 1
 
 
 def test_group_tester_without_extra_urls_keeps_single_url_behaviour():
@@ -121,7 +147,7 @@ def test_group_tester_without_extra_urls_keeps_single_url_behaviour():
 
 
 def test_group_tester_chunk_uses_measure_multi(monkeypatch):
-    settings = _tester_settings(extra_urls=[CF], min_destinations_ok=2)
+    settings = _tester_settings(extra_urls=[FB], min_destinations_ok=1)
     gt = GroupTester(settings)
     seen = []
 
@@ -149,7 +175,7 @@ def test_group_tester_chunk_uses_measure_multi(monkeypatch):
     item = {"id": 7, "outbound": {"type": "direct"}}
 
     assert gt._run_chunk([item]) == {7: 123}
-    assert seen == [(PRIMARY, (CF,), 2)]
+    assert seen == [(TG, (FB,), 1)]
 
 
 # --- StandbyProbe ---------------------------------------------------------
@@ -173,70 +199,74 @@ def _session(by_url):
     return session
 
 
-def test_probe_ready_when_a_majority_of_destinations_answer():
-    probe = StandbyProbe("127.0.0.1:9090", session=_session({PRIMARY: 100, CF: None, TG: 150}),
-                         urls=[PRIMARY, CF, TG], min_ok=2)
+def test_probe_ready_when_any_one_destination_answers():
+    probe = StandbyProbe("127.0.0.1:9090", session=_session({TG: None, FB: 150}),
+                         urls=[TG, FB], min_ok=1)
     result = probe.probe("cfg-2")
-    assert result.delay_ms == 100          # primary destination's latency
-    assert result.destinations == {PRIMARY: 100, CF: None, TG: 150}
+    assert result.delay_ms == 150           # the destination that answered
+    assert result.destinations == {TG: None, FB: 150}
     assert probe.ready(["cfg-2"])
-    assert CF in (result.last_error or "")  # partial failure stays visible
-    assert probe.snapshot()["cfg-2"]["destinations"][CF] is None
+    assert TG in (result.last_error or "")   # the partial failure stays visible
+    assert probe.snapshot()["cfg-2"]["destinations"][TG] is None
 
 
-def test_probe_not_ready_when_only_the_primary_answers():
-    probe = StandbyProbe("127.0.0.1:9090", session=_session({PRIMARY: 100, CF: None, TG: None}),
-                         urls=[PRIMARY, CF, TG], min_ok=2)
+def test_probe_not_ready_when_no_destination_answers():
+    probe = StandbyProbe("127.0.0.1:9090", session=_session({TG: None, FB: None}),
+                         urls=[TG, FB], min_ok=1)
     result = probe.probe("cfg-2")
     assert result.delay_ms is None
     assert probe.ready(["cfg-2"]) == []
     assert not probe.snapshot()["cfg-2"]["ready"]
 
 
-def test_probe_uses_the_fastest_answer_when_primary_is_down_but_majority_up():
-    probe = StandbyProbe("127.0.0.1:9090", session=_session({PRIMARY: None, CF: 90, TG: 70}),
-                         urls=[PRIMARY, CF, TG], min_ok=2)
-    assert probe.probe("cfg-2").delay_ms == 70
+def test_probe_reports_the_first_destinations_latency_when_it_answered():
+    probe = StandbyProbe("127.0.0.1:9090", session=_session({TG: 100, FB: 40}),
+                         urls=[TG, FB], min_ok=1)
+    assert probe.probe("cfg-2").delay_ms == 100
 
 
-def test_probe_recovers_after_a_failed_round():
-    answers = {PRIMARY: 100, CF: None, TG: None}
+def test_probe_with_both_required_needs_both():
+    answers = {TG: 100, FB: None}
     probe = StandbyProbe("127.0.0.1:9090", session=_session(answers),
-                         urls=[PRIMARY, CF, TG], min_ok=2)
+                         urls=[TG, FB], min_ok=2)
     probe.probe("cfg-2")
     assert probe.ready(["cfg-2"]) == []
-    answers[CF] = 60
+    answers[FB] = 60
     probe.probe("cfg-2")
     assert [r.tag for r in probe.ready(["cfg-2"])] == ["cfg-2"]
 
 
 def test_probe_with_explicit_url_checks_only_that_destination():
-    session = _session({PRIMARY: 100, CF: None, TG: None})
-    probe = StandbyProbe("127.0.0.1:9090", session=session,
-                         urls=[PRIMARY, CF, TG], min_ok=2)
-    result = probe.probe("cfg-2", PRIMARY)
+    session = _session({TG: 100, FB: None})
+    probe = StandbyProbe("127.0.0.1:9090", session=session, urls=[TG, FB], min_ok=2)
+    result = probe.probe("cfg-2", TG)
     assert result.delay_ms == 100
     assert session.get.call_count == 1
 
 
 def test_probe_min_ok_is_clamped_and_defaults_to_single_url():
-    probe = StandbyProbe("127.0.0.1:9090", session=_session({PRIMARY: 10}),
-                         urls=[PRIMARY], min_ok=5)
+    probe = StandbyProbe("127.0.0.1:9090", session=_session({TG: 10}), urls=[TG], min_ok=5)
     assert probe.min_ok == 1
-    default = StandbyProbe("127.0.0.1:9090")
-    assert len(default.urls) == 1
+    assert len(StandbyProbe("127.0.0.1:9090").urls) == 1
 
 
 # --- settings / wiring ----------------------------------------------------
 
-def test_default_settings_enable_multi_destination_checks(tmp_path):
+def test_defaults_use_filtered_sites_and_any_one_is_enough(tmp_path):
     cfg = tmp_path / "config.yaml"
-    # an installed config that predates the new keys
-    cfg.write_text('test:\n  url: "https://www.gstatic.com/generate_204"\n  timeout_seconds: 10\n')
-    settings = Settings(str(cfg))
-    assert settings["test"]["extra_urls"] == [
-        "https://cp.cloudflare.com/generate_204", "https://web.telegram.org/"]
-    assert settings["test"]["min_destinations_ok"] == 2
+    cfg.write_text("{}\n")
+    test = Settings(str(cfg))["test"]
+    assert test["url"] == TG
+    assert test["extra_urls"] == [FB]
+    assert test["min_destinations_ok"] == 1
+
+
+def test_config_without_the_new_keys_still_gets_the_extras(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text('test:\n  url: "https://web.telegram.org/"\n  timeout_seconds: 10\n')
+    test = Settings(str(cfg))["test"]
+    assert test["extra_urls"] == [FB]
+    assert test["min_destinations_ok"] == 1
 
 
 def test_empty_extra_urls_in_config_restores_single_url_check(tmp_path):
@@ -245,14 +275,9 @@ def test_empty_extra_urls_in_config_restores_single_url_check(tmp_path):
     assert Settings(str(cfg))["test"]["extra_urls"] == []
 
 
-def test_create_monitor_gives_the_probe_all_destinations(tmp_path):
+def test_create_monitor_gives_the_probe_the_same_destinations(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("{}\n")
-    settings = Settings(str(cfg))
-    monitor = create_monitor(settings, Mock())
-    assert monitor._probe.urls == [
-        "https://www.gstatic.com/generate_204",
-        "https://cp.cloudflare.com/generate_204",
-        "https://web.telegram.org/",
-    ]
-    assert monitor._probe.min_ok == 2
+    monitor = create_monitor(Settings(str(cfg)), Mock())
+    assert monitor._probe.urls == [TG, FB]
+    assert monitor._probe.min_ok == 1

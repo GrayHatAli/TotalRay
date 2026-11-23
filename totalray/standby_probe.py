@@ -9,7 +9,7 @@ from urllib.parse import quote
 
 import requests
 
-DEFAULT_URL = "https://www.gstatic.com/generate_204"
+DEFAULT_URL = "https://web.telegram.org/"
 
 
 @dataclass

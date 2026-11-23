@@ -211,3 +211,45 @@ delay endpoint, and through the real proxy path `curl` to `web.telegram.org` /
 Cloudflare return 204. A majority rule cannot express "Telegram is mandatory".
 Options: `min_destinations_ok: 3` (all destinations) or a `required_urls` list.
 Not changed in this plan; it is a policy decision (fewer eligible servers).
+
+---
+
+# Phase 5 - Health means "reaches filtered sites" (owner decision, 2026-11-22)
+
+## Goal
+
+Replace the generic-connectivity criterion (gstatic + Cloudflare, 2 of 3) with
+the owner's definition of a usable proxy: it can carry traffic to sites that are
+filtered in Iran. The destinations are `https://web.telegram.org/` and
+`https://facebook.com/`, and **answering either one is enough**.
+
+Rationale (from Phase 4's finding): a server can pass generic checks and still
+be unable to reach Telegram (`cfg-12669905` did). A generic site proves only
+that the server is up; a filtered site proves it can do the job the gateway
+exists for.
+
+## Tasks
+
+- [x] `measure_multi` treats every URL equally (no special primary): ordered
+      checks that stop as soon as `min_destinations_ok` is met or can no longer
+      be met. The delay returned is the first URL that answered.
+- [x] Defaults: `test.url = https://web.telegram.org/`,
+      `test.extra_urls = [https://facebook.com/]`, `test.min_destinations_ok = 1`.
+      Config template and the standby probe's fallback URL follow.
+- [x] Tests rewritten for the any-one / all / majority semantics, the probe,
+      the defaults and the monitor wiring.
+- [ ] Apply the new `test:` block to `/etc/totalray/config.yaml` on the Pi (it
+      pins the old `url`, so the defaults alone do not take effect) and
+      restart `totalray` only.
+- [ ] Verify live: all pool members and standbys are measured against the two
+      destinations; Pool B does not collapse; failover targets answer at least
+      one of them.
+
+## Trade-off accepted
+
+With "any one is enough" a server that reaches Facebook but not Telegram (or the
+reverse) counts as healthy. Raise `min_destinations_ok` to 2 to require both.
+
+## Suggested Commit
+
+`feat(health): judge servers by filtered sites (telegram, facebook) - any one answering is enough`
