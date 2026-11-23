@@ -238,10 +238,10 @@ exists for.
       Config template and the standby probe's fallback URL follow.
 - [x] Tests rewritten for the any-one / all / majority semantics, the probe,
       the defaults and the monitor wiring.
-- [ ] Apply the new `test:` block to `/etc/totalray/config.yaml` on the Pi (it
+- [x] Apply the new `test:` block to `/etc/totalray/config.yaml` on the Pi (it
       pins the old `url`, so the defaults alone do not take effect) and
       restart `totalray` only.
-- [ ] Verify live: all pool members and standbys are measured against the two
+- [x] Verify live: all pool members and standbys are measured against the two
       destinations; Pool B does not collapse; failover targets answer at least
       one of them.
 
@@ -253,3 +253,19 @@ reverse) counts as healthy. Raise `min_destinations_ok` to 2 to require both.
 ## Suggested Commit
 
 `feat(health): judge servers by filtered sites (telegram, facebook) - any one answering is enough`
+
+## Live verification (2026-11-23, applied 16:18:38 +0330)
+
+- `/etc/totalray/config.yaml` `test:` block updated (backup
+  `config.yaml.bak-20261122-filtered-sites`); effective settings read back:
+  `web.telegram.org`, extras `[facebook.com]`, `min_destinations_ok 1`,
+  `timeout_seconds 6`. Only `totalray` was restarted; `sing-box` kept running.
+- First rounds with the new rule: Pool B 85/114 then 111/119 healthy; Pool A 11
+  promoted of 132. Both standbys are probed on the two destinations only and
+  answer both; the active server answers both; no failover needed since.
+- Evidence gathered before the change (16 h on the previous criterion): DNS
+  survived 23 live group replacements with zero references to a retired leaf
+  (remaining DNS errors are real dial failures of the then-active server and end
+  at the next failover); 10 live failovers, but #8 and #9 (15:01-15:02) promoted
+  targets that failed at once and opened the circuit breaker (~11 minutes
+  without failover). Worth a follow-up: breaker window and promotion checks.
